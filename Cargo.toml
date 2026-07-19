@@ -1,0 +1,33 @@
+[package]
+name = "pooled-memory"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+description = "Multi-device pooled memory server with device/actor provenance, bitemporal lineage, and idempotent operation envelopes"
+license = "Apache-2.0"
+repository = "https://github.com/RecursiveIntell/pooled-memory"
+keywords = ["memory", "multi-device", "provenance", "agent", "semantic"]
+categories = ["database", "text-processing"]
+
+[features]
+default = ["server"]
+server = ["dep:axum", "dep:tower", "dep:tower-http"]
+
+[dependencies]
+semantic-memory = { path = "../central-memory-phase1/semantic-memory" }
+rusqlite = { version = "0.32", features = ["bundled", "blob"] }
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+uuid = { version = "1", features = ["v4"] }
+chrono = { version = "0.4", features = ["serde"] }
+thiserror = "1"
+schemars = "0.8"
+
+# Optional server deps
+axum = { version = "0.7", optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.6", optional = true, features = ["cors"] }
+
+[dev-dependencies]
+tempfile = "3"
