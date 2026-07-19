@@ -18,6 +18,9 @@ pub enum PooledMemoryError {
     #[error("database error: {0}")]
     Database(String),
 
+    #[error("io error: {0}")]
+    Io(#[from] std::io::Error),
+
     #[error("underlying memory error: {0}")]
     Memory(#[from] semantic_memory::MemoryError),
 }

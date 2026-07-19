@@ -8,7 +8,7 @@ use std::fmt;
 use std::str::FromStr;
 use uuid::{Uuid, Variant, Version};
 
-use crate::MemoryError;
+use semantic_memory::MemoryError;
 
 macro_rules! opaque_uuid_v4 {
     ($name:ident, $description:literal) => {
