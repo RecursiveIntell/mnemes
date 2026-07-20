@@ -162,3 +162,8 @@ pooled-memory-admin bootstrap /var/lib/pooled-memory laptop linux host.example.c
 ## License
 
 Apache-2.0
+
+
+## Phase 4 operations
+
+Production deployment, strict HTTP/MCP clients, the stdio proxy, and the provenance-witnessed Codex wrapper are documented in [`docs/PHASE4_OPERATIONS.md`](docs/PHASE4_OPERATIONS.md). The server remains loopback-only and clients fail closed without valid device credentials.
