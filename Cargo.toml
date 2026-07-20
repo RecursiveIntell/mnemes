@@ -14,7 +14,7 @@ default = ["server"]
 server = ["dep:axum", "dep:tower", "dep:tower-http"]
 
 [dependencies]
-semantic-memory = { path = "../central-memory-phase1/semantic-memory" }
+semantic-memory = { path = "../Libraries/semantic-memory" }
 rusqlite = { version = "0.32", features = ["bundled", "blob"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "net"] }
 serde = { version = "1", features = ["derive"] }
