@@ -15,7 +15,21 @@ def main():
     for line in sys.stdin:
         try:
             req=json.loads(line); ident=req.get("id"); method=req.get("method",""); params=dict(req.get("params") or {})
-            if method=="notifications/initialized": continue
+            if method == "notifications/initialized":
+                continue
+            if method == "initialize":
+                respond({
+                    "jsonrpc": "2.0", "id": ident,
+                    "result": {
+                        "protocolVersion": params.get("protocolVersion", "2024-11-05"),
+                        "capabilities": {"tools": {"listChanged": False}},
+                        "serverInfo": {"name": "pooled-memory", "version": "0.1.0"},
+                    },
+                })
+                continue
+            if method == "ping":
+                respond({"jsonrpc": "2.0", "id": ident, "result": {}})
+                continue
             if method in ("tools/list","tools/call"): params.setdefault("actor_id",client.actor_id)
             _,result=client.request("/v1/mcp","POST",{"jsonrpc":"2.0","id":ident,"method":method,"params":params})
             result["id"]=ident

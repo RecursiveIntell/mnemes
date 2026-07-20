@@ -42,6 +42,16 @@ class Phase4Tools(unittest.TestCase):
             try: r=subprocess.run([str(CLIENT),'health'],env=self.env(d),text=True,capture_output=True)
             finally: Handler.malformed=False
             self.assertNotEqual(r.returncode,0); self.assertIn('malformed JSON',r.stderr); self.assertNotIn('device:secret',r.stderr)
+    def test_proxy_initializes_as_standard_mcp(self):
+        with tempfile.TemporaryDirectory() as d:
+            request=json.dumps({'jsonrpc':'2.0','id':3,'method':'initialize','params':{'protocolVersion':'2024-11-05'}})+'\n'
+            r=subprocess.run([str(PROXY)],input=request,env=self.env(d),text=True,capture_output=True)
+            self.assertEqual(r.returncode,0,r.stderr)
+            result=json.loads(r.stdout)['result']
+            self.assertEqual(result['protocolVersion'],'2024-11-05')
+            self.assertIn('tools',result['capabilities'])
+            self.assertEqual(result['serverInfo']['name'],'pooled-memory')
+
     def test_proxy_injects_actor(self):
         with tempfile.TemporaryDirectory() as d:
             request=json.dumps({'jsonrpc':'2.0','id':7,'method':'tools/list','params':{}})+'\n'
