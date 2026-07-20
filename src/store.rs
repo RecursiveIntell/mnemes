@@ -1838,7 +1838,7 @@ impl PooledMemoryStore {
 
         let conn = self.pool_conn.lock().await;
         let mut stmt = conn.prepare(&sql)?;
-        let mut rows = stmt.query(rusqlite::params_from_iter(args.into_iter()))?;
+        let mut rows = stmt.query(rusqlite::params_from_iter(args))?;
         let mut edges = Vec::new();
         while let Some(row) = rows.next()? {
             edges.push(Self::map_row_to_provenance_edge(row)?);
