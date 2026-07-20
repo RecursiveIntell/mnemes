@@ -5,12 +5,46 @@
 use crate::error::PooledMemoryError;
 use crate::types::*;
 use chrono::{DateTime, Utc};
+use rand::distributions::{Alphanumeric, DistString};
 use rusqlite::{params, OptionalExtension};
 use semantic_memory::GraphDirection;
 use serde_json::Value;
+use sha2::{Digest, Sha256};
 use std::collections::{HashSet, VecDeque};
 use std::path::PathBuf;
 use std::sync::Arc;
+
+/// Credentials for a registered device are a random token (`device_id:secret`).
+/// Only `secret`-derived digest is persisted.
+#[derive(Debug, Clone)]
+struct DeviceCredential {
+    token: String,
+    digest: String,
+}
+
+fn sha256_hex(value: &str) -> String {
+    let mut hasher = Sha256::new();
+    hasher.update(value.as_bytes());
+    let output = hasher.finalize();
+    output
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect::<String>()
+}
+
+impl DeviceCredential {
+    fn new(device_id: &DeviceId) -> Self {
+        let secret = Alphanumeric.sample_string(&mut rand::thread_rng(), 64);
+        let token = format!("{}:{}", device_id.as_str(), secret);
+        let digest = format!("sha256:{}", sha256_hex(&token));
+        Self { token, digest }
+    }
+
+    fn verify(stored: &Option<String>, token: &str) -> bool {
+        let candidate = format!("sha256:{}", sha256_hex(token));
+        stored.as_ref().is_some_and(|value| value == &candidate)
+    }
+}
 
 /// Combined pooled memory store.
 ///
@@ -107,11 +141,28 @@ impl PooledMemoryStore {
                 actor_id        TEXT PRIMARY KEY,
                 device_id       TEXT NOT NULL REFERENCES devices(device_id),
                 actor_kind      TEXT NOT NULL,
+                tool_profile    TEXT NOT NULL DEFAULT 'agent'
+                    CHECK (tool_profile IN ('agent', 'operator')),
                 provider_model  TEXT,
                 recorded_at     TEXT NOT NULL,
                 created_at      TEXT NOT NULL DEFAULT (datetime('now'))
             );
             CREATE INDEX IF NOT EXISTS idx_actors_device ON actors(device_id);
+
+            CREATE TABLE IF NOT EXISTS audit_events (
+                event_id TEXT PRIMARY KEY,
+                device_id TEXT,
+                actor_id TEXT,
+                endpoint TEXT NOT NULL,
+                method TEXT NOT NULL,
+                outcome TEXT NOT NULL CHECK (outcome IN ('ok', 'denied', 'error')),
+                detail TEXT,
+                created_at TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_audit_events_created_at
+                ON audit_events(created_at);
+            CREATE INDEX IF NOT EXISTS idx_audit_events_endpoint
+                ON audit_events(endpoint, method);
 
             CREATE TABLE IF NOT EXISTS operation_envelopes (
                 operation_id            TEXT PRIMARY KEY,
@@ -177,10 +228,261 @@ impl PooledMemoryStore {
             );",
         )?;
 
+        if !Self::has_table_column(conn, "actors", "tool_profile")? {
+            conn.execute("ALTER TABLE actors ADD COLUMN tool_profile TEXT NOT NULL DEFAULT 'agent' CHECK (tool_profile IN ('agent', 'operator'))", [])?;
+            conn.execute(
+                "UPDATE actors SET tool_profile = 'agent' WHERE tool_profile IS NULL",
+                [],
+            )?;
+        }
+
+        if !Self::has_table_column(conn, "audit_events", "detail")? {
+            conn.execute(
+                "CREATE TABLE IF NOT EXISTS audit_events (
+                    event_id TEXT PRIMARY KEY,
+                    device_id TEXT,
+                    actor_id TEXT,
+                    endpoint TEXT NOT NULL,
+                    method TEXT NOT NULL,
+                    outcome TEXT NOT NULL CHECK (outcome IN ('ok', 'denied', 'error')),
+                    detail TEXT,
+                    created_at TEXT NOT NULL
+                );",
+                [],
+            )?;
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_created_at ON audit_events(created_at)", [])?;
+            conn.execute("CREATE INDEX IF NOT EXISTS idx_audit_events_endpoint ON audit_events(endpoint, method)", [])?;
+        }
+
+        Ok(())
+    }
+
+    fn has_table_column(
+        conn: &rusqlite::Connection,
+        table: &str,
+        column: &str,
+    ) -> Result<bool, PooledMemoryError> {
+        let pragma = format!("PRAGMA table_info({table})");
+        let mut statement = conn.prepare(&pragma)?;
+        let mut rows = statement.query([])?;
+        while let Some(row) = rows.next()? {
+            let name: String = row.get(1)?;
+            if name == column {
+                return Ok(true);
+            }
+        }
+        Ok(false)
+    }
+
+    fn generate_device_credentials(device_id: &DeviceId) -> DeviceCredential {
+        DeviceCredential::new(device_id)
+    }
+
+    fn parse_authorization_token(raw: &str) -> Result<(DeviceId, String), PooledMemoryError> {
+        let token = raw.trim();
+        let (device_id_value, secret) = token
+            .split_once(':')
+            .ok_or(PooledMemoryError::InvalidCredential)?;
+        if secret.is_empty() {
+            return Err(PooledMemoryError::InvalidCredential);
+        }
+
+        let device_id = DeviceId::parse(device_id_value)?;
+        Ok((device_id, secret.to_string()))
+    }
+
+    async fn token_device_id(
+        &self,
+        token: &str,
+    ) -> Result<(Device, Option<String>), PooledMemoryError> {
+        let (device_id, secret) = Self::parse_authorization_token(token)?;
+        let mut row = {
+            let conn = self.pool_conn.lock().await;
+            conn.query_row(
+                "SELECT credential_fingerprint, status FROM devices WHERE device_id = ?1",
+                params![device_id.as_str()],
+                |row| Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?)),
+            )
+            .ok()
+        };
+
+        let (stored_fingerprint, status) = match row.take() {
+            Some(value) => value,
+            None => return Err(PooledMemoryError::InvalidCredential),
+        };
+
+        if status != DeviceStatus::Active.as_str() {
+            return Err(PooledMemoryError::DeviceNotActive(format!(
+                "{device_id} (status: {status})"
+            )));
+        }
+
+        let full_token = format!("{}:{}", device_id.as_str(), secret);
+        if !DeviceCredential::verify(&stored_fingerprint, &full_token) {
+            return Err(PooledMemoryError::InvalidCredential);
+        }
+
+        let device = self
+            .get_device(&device_id)
+            .await?
+            .ok_or_else(|| PooledMemoryError::DeviceNotFound(device_id.to_string()))?;
+        Ok((device, stored_fingerprint))
+    }
+
+    fn bootstrap_with_tx(
+        tx: &rusqlite::Transaction<'_>,
+        mut device: Device,
+        mut actor: Actor,
+        created_at: String,
+        credential: DeviceCredential,
+    ) -> Result<(DeviceId, ActorId, String), PooledMemoryError> {
+        device.first_seen_at = created_at.clone();
+        device.last_seen_at = created_at.clone();
+        device.credential_fingerprint = Some(credential.digest);
+        actor.recorded_at = created_at;
+        actor.device_id = device.device_id.clone();
+
+        tx.execute(
+            "INSERT INTO devices (device_id, label, platform, hostname, \
+             credential_fingerprint, first_seen_at, last_seen_at, status) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                device.device_id.as_str(),
+                device.label,
+                device.platform,
+                device.hostname,
+                device.credential_fingerprint,
+                device.first_seen_at,
+                device.last_seen_at,
+                device.status.as_str(),
+            ],
+        )?;
+
+        tx.execute(
+            "INSERT INTO actors (actor_id, device_id, actor_kind, tool_profile, provider_model, recorded_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                actor.actor_id.as_str(),
+                actor.device_id.as_str(),
+                actor.actor_kind.as_str(),
+                actor.tool_profile.as_str(),
+                actor.provider_model,
+                actor.recorded_at,
+            ],
+        )?;
+
+        Ok((
+            device.device_id.clone(),
+            actor.actor_id.clone(),
+            credential.token,
+        ))
+    }
+
+    #[cfg(test)]
+    async fn bootstrap_with_actor(
+        &self,
+        device: Device,
+        actor: Actor,
+    ) -> Result<(DeviceId, ActorId, String, String), PooledMemoryError> {
+        let created_at = Utc::now().to_rfc3339();
+        let credentials = Self::generate_device_credentials(&device.device_id);
+
+        let mut conn = self.pool_conn.lock().await;
+        let tx = conn.transaction()?;
+        let (device_id, actor_id, credential) =
+            Self::bootstrap_with_tx(&tx, device, actor, created_at.clone(), credentials)?;
+        tx.commit()?;
+        Ok((device_id, actor_id, credential, created_at))
+    }
+
+    pub async fn authenticate_request(
+        &self,
+        token: &str,
+        actor_id: Option<&ActorId>,
+    ) -> Result<(Device, Option<Actor>), PooledMemoryError> {
+        let (device, _fingerprint) = self.token_device_id(token).await?;
+        let actor = if let Some(actor_id) = actor_id {
+            let actor = self
+                .get_actor(actor_id)
+                .await?
+                .ok_or_else(|| PooledMemoryError::ActorNotFound(actor_id.to_string()))?;
+
+            if actor.device_id != device.device_id {
+                return Err(PooledMemoryError::AuthorizationDenied(
+                    "actor does not belong to device".to_string(),
+                ));
+            }
+
+            Some(actor)
+        } else {
+            None
+        };
+
+        Ok((device, actor))
+    }
+
+    pub async fn ensure_actor_profile(
+        &self,
+        actor: &Option<Actor>,
+        requires_full: bool,
+    ) -> Result<(), PooledMemoryError> {
+        if requires_full {
+            let actor = actor.as_ref().ok_or_else(|| {
+                PooledMemoryError::AuthorizationDenied("actor required".to_string())
+            })?;
+            if !actor.tool_profile.is_full() {
+                return Err(PooledMemoryError::AuthorizationDenied(
+                    "actor lacks operator profile".to_string(),
+                ));
+            }
+        }
+
         Ok(())
     }
 
     // ─── Device registry ──────────────────────────────────────────────
+
+    pub async fn bootstrap(
+        &self,
+        device: Device,
+        actor_kind: ActorKind,
+    ) -> Result<(DeviceId, ActorId, String, String), PooledMemoryError> {
+        let mut conn = self.pool_conn.lock().await;
+        let tx = conn.transaction()?;
+        let existing_devices: i64 =
+            tx.query_row("SELECT COUNT(*) FROM devices", [], |row| row.get(0))?;
+        if existing_devices > 0 {
+            return Err(PooledMemoryError::BootstrapRejected(
+                "bootstrap requires an empty device registry".to_string(),
+            ));
+        }
+
+        let actor = Actor {
+            actor_id: ActorId::new(),
+            device_id: device.device_id.clone(),
+            tool_profile: ToolProfile::Operator,
+            actor_kind,
+            provider_model: None,
+            recorded_at: String::new(),
+        };
+
+        let now = Utc::now().to_rfc3339();
+        let credentials = Self::generate_device_credentials(&device.device_id);
+        let (device_id, actor_id, credential) =
+            Self::bootstrap_with_tx(&tx, device, actor, now.clone(), credentials)?;
+        tx.commit()?;
+        Ok((device_id, actor_id, credential, now))
+    }
+
+    pub async fn register_device_with_generated_credential(
+        &self,
+        mut device: Device,
+    ) -> Result<(DeviceId, String), PooledMemoryError> {
+        let credentials = Self::generate_device_credentials(&device.device_id);
+        device.credential_fingerprint = Some(credentials.digest);
+        let device_id = self.register_device(device).await?;
+        Ok((device_id, credentials.token))
+    }
 
     pub async fn register_device(&self, mut device: Device) -> Result<DeviceId, PooledMemoryError> {
         let now = Utc::now().to_rfc3339();
@@ -205,6 +507,23 @@ impl PooledMemoryStore {
             ],
         )?;
         Ok(device_id_return)
+    }
+
+    pub async fn rotate_device_credential(
+        &self,
+        device_id: &DeviceId,
+    ) -> Result<String, PooledMemoryError> {
+        let credentials = Self::generate_device_credentials(device_id);
+        let now = Utc::now().to_rfc3339();
+        let conn = self.pool_conn.lock().await;
+        let affected = conn.execute(
+            "UPDATE devices SET credential_fingerprint = ?1, last_seen_at = ?2 WHERE device_id = ?3",
+            params![credentials.digest, now, device_id.as_str()],
+        )?;
+        if affected == 0 {
+            return Err(PooledMemoryError::DeviceNotFound(device_id.to_string()));
+        }
+        Ok(credentials.token)
     }
 
     pub async fn get_device(
@@ -251,6 +570,71 @@ impl PooledMemoryStore {
         }
     }
 
+    pub async fn set_device_status(
+        &self,
+        device_id: &DeviceId,
+        status: DeviceStatus,
+    ) -> Result<(), PooledMemoryError> {
+        let now = Utc::now().to_rfc3339();
+        let conn = self.pool_conn.lock().await;
+        let affected = conn.execute(
+            "UPDATE devices SET status = ?1, last_seen_at = ?2 WHERE device_id = ?3",
+            params![status.as_str(), now, device_id.as_str()],
+        )?;
+        if affected == 0 {
+            return Err(PooledMemoryError::DeviceNotFound(device_id.to_string()));
+        }
+        Ok(())
+    }
+
+    pub async fn list_devices_for_actor(
+        &self,
+        actor: &Actor,
+    ) -> Result<Vec<Device>, PooledMemoryError> {
+        self.list_devices_for_device(&actor.device_id).await
+    }
+
+    async fn list_devices_for_device(
+        &self,
+        device_id: &DeviceId,
+    ) -> Result<Vec<Device>, PooledMemoryError> {
+        let conn = self.pool_conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT device_id, label, platform, hostname, credential_fingerprint, \
+             first_seen_at, last_seen_at, status \
+             FROM devices WHERE device_id = ?1 ORDER BY first_seen_at ASC",
+        )?;
+        let rows = stmt.query_map(params![device_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+                row.get::<_, String>(6)?,
+                row.get::<_, String>(7)?,
+            ))
+        })?;
+
+        let mut devices = Vec::new();
+        for row in rows {
+            let (did, label, platform, hostname, cred, first, last, status) = row?;
+            devices.push(Device {
+                device_id: DeviceId::parse(&did)?,
+                label,
+                platform,
+                hostname,
+                credential_fingerprint: cred,
+                first_seen_at: first,
+                last_seen_at: last,
+                status: DeviceStatus::parse(&status, &did)?,
+            });
+        }
+
+        Ok(devices)
+    }
+
     pub async fn list_devices(&self) -> Result<Vec<Device>, PooledMemoryError> {
         let conn = self.pool_conn.lock().await;
         let mut stmt = conn.prepare(
@@ -289,16 +673,8 @@ impl PooledMemoryStore {
     }
 
     pub async fn revoke_device(&self, device_id: &DeviceId) -> Result<(), PooledMemoryError> {
-        let now = Utc::now().to_rfc3339();
-        let conn = self.pool_conn.lock().await;
-        let affected = conn.execute(
-            "UPDATE devices SET status = 'revoked', last_seen_at = ?1 WHERE device_id = ?2",
-            params![now, device_id.as_str()],
-        )?;
-        if affected == 0 {
-            return Err(PooledMemoryError::DeviceNotFound(device_id.to_string()));
-        }
-        Ok(())
+        self.set_device_status(device_id, DeviceStatus::Revoked)
+            .await
     }
 
     pub async fn heartbeat_device(&self, device_id: &DeviceId) -> Result<(), PooledMemoryError> {
@@ -333,12 +709,13 @@ impl PooledMemoryStore {
 
         let conn = self.pool_conn.lock().await;
         conn.execute(
-            "INSERT INTO actors (actor_id, device_id, actor_kind, provider_model, recorded_at) \
-             VALUES (?1, ?2, ?3, ?4, ?5)",
+            "INSERT INTO actors (actor_id, device_id, actor_kind, tool_profile, provider_model, recorded_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
             params![
                 actor.actor_id.as_str(),
                 actor.device_id.as_str(),
                 actor.actor_kind.as_str(),
+                actor.tool_profile.as_str(),
                 actor.provider_model,
                 actor.recorded_at,
             ],
@@ -346,11 +723,80 @@ impl PooledMemoryStore {
         Ok(actor_id_return)
     }
 
+    pub async fn list_actors_for_device(
+        &self,
+        device_id: &DeviceId,
+    ) -> Result<Vec<Actor>, PooledMemoryError> {
+        let conn = self.pool_conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT actor_id, device_id, actor_kind, tool_profile, provider_model, recorded_at \
+             FROM actors WHERE device_id = ?1 ORDER BY recorded_at ASC",
+        )?;
+        let rows = stmt.query_map(params![device_id.as_str()], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+
+        let mut actors = Vec::new();
+        for row in rows {
+            let (aid, did, kind_str, tool_profile_str, pm, recorded_at) = row?;
+            actors.push(Actor {
+                actor_id: ActorId::parse(&aid)?,
+                device_id: DeviceId::parse(&did)?,
+                actor_kind: ActorKind::parse(kind_str),
+                tool_profile: ToolProfile::parse(&tool_profile_str).unwrap_or_default(),
+                provider_model: pm,
+                recorded_at,
+            });
+        }
+
+        Ok(actors)
+    }
+
+    pub async fn list_actors(&self) -> Result<Vec<Actor>, PooledMemoryError> {
+        let conn = self.pool_conn.lock().await;
+        let mut stmt = conn.prepare(
+            "SELECT actor_id, device_id, actor_kind, tool_profile, provider_model, recorded_at \
+             FROM actors ORDER BY recorded_at ASC",
+        )?;
+        let rows = stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, String>(5)?,
+            ))
+        })?;
+
+        let mut actors = Vec::new();
+        for row in rows {
+            let (aid, did, kind_str, tool_profile_str, pm, recorded_at) = row?;
+            actors.push(Actor {
+                actor_id: ActorId::parse(&aid)?,
+                device_id: DeviceId::parse(&did)?,
+                actor_kind: ActorKind::parse(kind_str),
+                tool_profile: ToolProfile::parse(&tool_profile_str).unwrap_or_default(),
+                provider_model: pm,
+                recorded_at,
+            });
+        }
+
+        Ok(actors)
+    }
+
     pub async fn get_actor(&self, actor_id: &ActorId) -> Result<Option<Actor>, PooledMemoryError> {
         let conn = self.pool_conn.lock().await;
         let result = conn
             .query_row(
-                "SELECT actor_id, device_id, actor_kind, provider_model, recorded_at \
+                "SELECT actor_id, device_id, actor_kind, tool_profile, provider_model, recorded_at \
                  FROM actors WHERE actor_id = ?1",
                 params![actor_id.as_str()],
                 |row| {
@@ -358,18 +804,20 @@ impl PooledMemoryStore {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, Option<String>>(3)?,
-                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, Option<String>>(4)?,
+                        row.get::<_, String>(5)?,
                     ))
                 },
             )
             .ok();
 
-        if let Some((aid, did, kind_str, pm, rat)) = result {
+        if let Some((aid, did, kind_str, profile_str, pm, rat)) = result {
             Ok(Some(Actor {
                 actor_id: ActorId::parse(&aid)?,
                 device_id: DeviceId::parse(&did)?,
                 actor_kind: ActorKind::parse(kind_str),
+                tool_profile: ToolProfile::parse(&profile_str).unwrap_or_default(),
                 provider_model: pm,
                 recorded_at: rat,
             }))
@@ -386,8 +834,21 @@ impl PooledMemoryStore {
     ) -> Result<String, PooledMemoryError> {
         // Check idempotency first
         let idempotency_key = envelope.idempotency_key.clone();
-        if let Some(existing) = self.check_idempotency(&idempotency_key).await? {
-            return Ok(existing);
+        if let Some(existing) = self
+            .get_operation_by_idempotency_key(&idempotency_key)
+            .await?
+        {
+            if existing.content_digest == envelope.content_digest {
+                return existing
+                    .receipt_id
+                    .ok_or(PooledMemoryError::IdempotencyConflict(format!(
+                        "operation with key {idempotency_key} has no persistent receipt"
+                    )));
+            }
+
+            return Err(PooledMemoryError::IdempotencyConflict(format!(
+                "operation with key {idempotency_key} already exists"
+            )));
         }
 
         let now = Utc::now().to_rfc3339();
@@ -420,6 +881,42 @@ impl PooledMemoryStore {
             ],
         )?;
         Ok(receipt_id)
+    }
+
+    /// Run `PRAGMA quick_check` against the pooled SQLite database.
+    pub async fn quick_check(&self) -> Result<String, PooledMemoryError> {
+        let conn = self.pool_conn.lock().await;
+        let check = conn
+            .query_row("PRAGMA quick_check", [], |row| row.get::<_, String>(0))
+            .unwrap_or_else(|_| "error".to_string());
+        Ok(check)
+    }
+
+    /// Total number of registered devices.
+    pub async fn count_devices(&self) -> Result<u64, PooledMemoryError> {
+        let conn = self.pool_conn.lock().await;
+        let total = conn.query_row("SELECT COUNT(*) FROM devices", [], |row| {
+            row.get::<_, u64>(0)
+        })?;
+        Ok(total)
+    }
+
+    /// Total number of registered actors.
+    pub async fn count_actors(&self) -> Result<u64, PooledMemoryError> {
+        let conn = self.pool_conn.lock().await;
+        let total = conn.query_row("SELECT COUNT(*) FROM actors", [], |row| {
+            row.get::<_, u64>(0)
+        })?;
+        Ok(total)
+    }
+
+    /// Total number of operation envelopes persisted in the pool.
+    pub async fn count_operations(&self) -> Result<u64, PooledMemoryError> {
+        let conn = self.pool_conn.lock().await;
+        let total = conn.query_row("SELECT COUNT(*) FROM operation_envelopes", [], |row| {
+            row.get::<_, u64>(0)
+        })?;
+        Ok(total)
     }
 
     pub async fn get_operation(
@@ -494,6 +991,165 @@ impl PooledMemoryStore {
         }
     }
 
+    pub async fn get_operation_by_idempotency_key(
+        &self,
+        idempotency_key: &str,
+    ) -> Result<Option<OperationEnvelope>, PooledMemoryError> {
+        let operation_id = {
+            let conn = self.pool_conn.lock().await;
+            conn.query_row(
+                "SELECT operation_id FROM operation_envelopes WHERE idempotency_key = ?1 LIMIT 1",
+                params![idempotency_key],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        };
+
+        if let Some(operation_id) = operation_id {
+            self.get_operation(&OperationId::parse(&operation_id)?)
+                .await
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn get_operation_by_receipt(
+        &self,
+        receipt_id: &str,
+    ) -> Result<Option<OperationEnvelope>, PooledMemoryError> {
+        let result = {
+            let conn = self.pool_conn.lock().await;
+            conn.query_row(
+                "SELECT operation_id FROM operation_envelopes WHERE receipt_id = ?1 LIMIT 1",
+                params![receipt_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        };
+
+        if let Some(oid) = result {
+            self.get_operation(&OperationId::parse(&oid)?).await
+        } else {
+            Ok(None)
+        }
+    }
+
+    pub async fn list_operations(
+        &self,
+        device_id: Option<&DeviceId>,
+        actor_id: Option<&ActorId>,
+        limit: usize,
+    ) -> Result<Vec<OperationEnvelope>, PooledMemoryError> {
+        let conn = self.pool_conn.lock().await;
+
+        let mut sql = String::from(
+            "SELECT operation_id, idempotency_key, requesting_device_id, \
+             requesting_actor_id, recording_device_id, recording_server_id, \
+             operation_kind, target_kind, target_id, content_digest, \
+             observed_at, valid_time, recorded_at, receipt_id \
+             FROM operation_envelopes WHERE 1=1",
+        );
+        let mut params_values: Vec<String> = Vec::new();
+
+        if let Some(device_id) = device_id {
+            sql.push_str(" AND requesting_device_id = ?");
+            params_values.push(device_id.as_str().to_string());
+        }
+
+        if let Some(actor_id) = actor_id {
+            sql.push_str(" AND requesting_actor_id = ?");
+            params_values.push(actor_id.as_str().to_string());
+        }
+
+        sql.push_str(" ORDER BY recorded_at DESC LIMIT ?");
+        let effective_limit = if limit == 0 { 100 } else { limit };
+        params_values.push(effective_limit.to_string());
+
+        let mut statement = conn.prepare(&sql)?;
+        let mut rows = {
+            let raw_params: Vec<rusqlite::types::Value> = params_values
+                .iter()
+                .enumerate()
+                .map(|(index, value)| {
+                    if index + 1 == params_values.len() {
+                        rusqlite::types::Value::Integer(value.parse::<i64>().unwrap_or(100))
+                    } else {
+                        rusqlite::types::Value::Text(value.clone())
+                    }
+                })
+                .collect();
+            statement.query(rusqlite::params_from_iter(raw_params))?
+        };
+
+        let mut operations = Vec::new();
+        while let Some(row) = rows.next()? {
+            let value = self.map_row_to_operation(row)?;
+            operations.push(value);
+        }
+
+        Ok(operations)
+    }
+
+    fn map_row_to_operation(
+        &self,
+        row: &rusqlite::Row<'_>,
+    ) -> Result<OperationEnvelope, rusqlite::Error> {
+        Ok(OperationEnvelope {
+            operation_id: OperationId::parse(&row.get::<_, String>(0)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+            idempotency_key: row.get(1)?,
+            requesting_device_id: DeviceId::parse(&row.get::<_, String>(2)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    2,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+            requesting_actor_id: ActorId::parse(&row.get::<_, String>(3)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    3,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+            recording_device_id: DeviceId::parse(&row.get::<_, String>(4)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    4,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+            recording_server_id: DeviceId::parse(&row.get::<_, String>(5)?).map_err(|error| {
+                rusqlite::Error::FromSqlConversionFailure(
+                    5,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                )
+            })?,
+            operation_kind: OperationKind::parse(&row.get::<_, String>(6)?, "operation").map_err(
+                |error| {
+                    rusqlite::Error::FromSqlConversionFailure(
+                        6,
+                        rusqlite::types::Type::Text,
+                        Box::new(error),
+                    )
+                },
+            )?,
+            target_kind: row.get(7)?,
+            target_id: row.get(8)?,
+            content_digest: row.get(9)?,
+            observed_at: row.get(10)?,
+            valid_time: row.get(11)?,
+            recorded_at: row.get(12)?,
+            receipt_id: row.get(13)?,
+        })
+    }
+
     pub async fn check_idempotency(
         &self,
         idempotency_key: &str,
@@ -508,6 +1164,66 @@ impl PooledMemoryStore {
             .ok()
             .flatten();
         Ok(result)
+    }
+
+    pub async fn log_audit_event(
+        &self,
+        device: Option<&DeviceId>,
+        actor: Option<&ActorId>,
+        endpoint: &str,
+        method: &str,
+        outcome: &str,
+        detail: Option<&str>,
+    ) -> Result<(), PooledMemoryError> {
+        let conn = self.pool_conn.lock().await;
+        let now = Utc::now().to_rfc3339();
+        let event_id = uuid::Uuid::new_v4().to_string();
+        conn.execute(
+            "INSERT INTO audit_events (event_id, device_id, actor_id, endpoint, method, outcome, detail, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+            params![
+                event_id,
+                device.map(DeviceId::as_str),
+                actor.map(ActorId::as_str),
+                endpoint,
+                method,
+                outcome,
+                detail,
+                now,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub async fn list_audit_events(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<AuditEvent>, PooledMemoryError> {
+        let conn = self.pool_conn.lock().await;
+        let effective_limit = if limit == 0 { 100 } else { limit };
+        let mut stmt = conn.prepare(
+            "SELECT event_id, device_id, actor_id, endpoint, method, outcome, detail, created_at \
+             FROM audit_events ORDER BY created_at DESC LIMIT ?1",
+        )?;
+        let rows = stmt.query_map(params![effective_limit.to_string()], |row| {
+            Ok(AuditEvent {
+                event_id: row.get::<_, String>(0)?,
+                device_id: row.get::<_, Option<String>>(1)?,
+                actor_id: row.get::<_, Option<String>>(2)?,
+                endpoint: row.get::<_, String>(3)?,
+                method: row.get::<_, String>(4)?,
+                outcome: row.get::<_, String>(5)?,
+                detail: row.get::<_, Option<String>>(6)?,
+                created_at: row.get::<_, String>(7)?,
+            })
+        })?;
+
+        let mut events = Vec::new();
+        for row in rows {
+            events.push(row?);
+        }
+
+        Ok(events)
     }
 
     // ─── Provenance edge helpers ─────────────────────────────────────
@@ -1574,5 +2290,139 @@ mod tests {
         // Verify the underlying semantic-memory store is accessible
         let stats = store.memory().stats().await.unwrap();
         assert_eq!(stats.total_facts, 0);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_creates_operator_and_is_authenticatable() {
+        let (store, _dir) = open_test_store();
+        let device = Device::new(DeviceId::new(), "bootstrap", "linux", "localhost");
+        let (device_id, actor_id, credential, created_at) = store
+            .bootstrap(device.clone(), ActorKind::Human)
+            .await
+            .unwrap();
+
+        assert_eq!(device_id, device.device_id);
+        assert!(!actor_id.to_string().is_empty());
+        assert!(!credential.is_empty());
+        assert!(!created_at.is_empty());
+
+        let created_device = store.get_device(&device_id).await.unwrap().unwrap();
+        assert_eq!(created_device.device_id, device_id);
+        assert_eq!(created_device.label, device.label);
+        assert_eq!(created_device.platform, device.platform);
+        assert_eq!(created_device.hostname, device.hostname);
+
+        let created_actor = store.get_actor(&actor_id).await.unwrap().unwrap();
+        assert_eq!(created_actor.actor_id, actor_id);
+        assert_eq!(created_actor.device_id, device_id);
+        assert_eq!(created_actor.tool_profile, ToolProfile::Operator);
+        assert_eq!(created_actor.actor_kind, ActorKind::Human);
+
+        let (authed_device, authed_actor) = store
+            .authenticate_request(&credential, Some(&actor_id))
+            .await
+            .unwrap();
+        assert_eq!(authed_device.device_id, device_id);
+        assert_eq!(authed_actor.unwrap().actor_id, actor_id);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_persists_only_credential_digest() {
+        let (store, _dir) = open_test_store();
+        let (device_id, actor_id, credential, _created_at) = store
+            .bootstrap(
+                Device::new(DeviceId::new(), "bootstrap", "linux", "localhost"),
+                ActorKind::Service,
+            )
+            .await
+            .unwrap();
+
+        let device = store.get_device(&device_id).await.unwrap().unwrap();
+        let secret = credential
+            .strip_prefix(&format!("{device_id}:"))
+            .expect("credential format should include device id");
+
+        let fingerprint = device.credential_fingerprint.unwrap();
+        assert!(!fingerprint.contains(secret));
+        assert!(fingerprint.starts_with("sha256:"));
+        assert!(store
+            .authenticate_request(&credential, Some(&actor_id))
+            .await
+            .is_ok());
+    }
+
+    #[tokio::test]
+    async fn bootstrap_rejects_if_not_first_device() {
+        let (store, _dir) = open_test_store();
+        let _ = store
+            .bootstrap(
+                Device::new(DeviceId::new(), "bootstrap", "linux", "localhost"),
+                ActorKind::Human,
+            )
+            .await
+            .unwrap();
+        let second_attempt = store
+            .bootstrap(
+                Device::new(DeviceId::new(), "bootstrap", "linux", "localhost"),
+                ActorKind::Human,
+            )
+            .await;
+
+        assert!(matches!(
+            second_attempt,
+            Err(PooledMemoryError::BootstrapRejected(_))
+        ));
+
+        let devices = store.list_devices().await.unwrap();
+        let actors = store.list_actors().await.unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(actors.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn bootstrap_is_atomic_if_actor_insert_fails() {
+        let (store, _dir) = open_test_store();
+
+        let preexisting_device_id = DeviceId::new();
+        store
+            .register_device(Device::new(
+                preexisting_device_id.clone(),
+                "existing",
+                "linux",
+                "host",
+            ))
+            .await
+            .unwrap();
+        let duplicate_actor_id = ActorId::new();
+        store
+            .register_actor(Actor::new(
+                duplicate_actor_id.clone(),
+                preexisting_device_id,
+                ActorKind::Hermes,
+            ))
+            .await
+            .unwrap();
+
+        let actor = Actor {
+            actor_id: duplicate_actor_id,
+            device_id: DeviceId::new(),
+            tool_profile: ToolProfile::Operator,
+            actor_kind: ActorKind::Hermes,
+            provider_model: None,
+            recorded_at: String::new(),
+        };
+
+        let failed = store
+            .bootstrap_with_actor(
+                Device::new(DeviceId::new(), "new-device", "linux", "new-host"),
+                actor,
+            )
+            .await;
+        assert!(failed.is_err());
+
+        let devices = store.list_devices().await.unwrap();
+        let actors = store.list_actors().await.unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(actors.len(), 1);
     }
 }

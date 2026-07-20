@@ -9,6 +9,15 @@ pub enum PooledMemoryError {
     #[error("device is not active: {0}")]
     DeviceNotActive(String),
 
+    #[error("invalid device credential")]
+    InvalidCredential,
+
+    #[error("authorization denied: {0}")]
+    AuthorizationDenied(String),
+
+    #[error("bootstrap rejected: {0}")]
+    BootstrapRejected(String),
+
     #[error("actor not found: {0}")]
     ActorNotFound(String),
 

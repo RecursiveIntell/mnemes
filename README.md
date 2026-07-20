@@ -127,6 +127,38 @@ async fn main() {
 }
 ```
 
+## Local bootstrap admin
+
+Use `pooled-memory-admin` for an offline bootstrap of a brand-new store:
+
+```bash
+pooled-memory-admin bootstrap <DATA_DIR> <LABEL> <PLATFORM> <HOSTNAME> [ACTOR_KIND]
+```
+
+`<ACTOR_KIND>` defaults to `human` when omitted.
+The command exits non-zero on failure, including cases where a device already
+exists in the data directory, and prints one JSON object on success:
+
+```json
+{"device_id":"...","actor_id":"...","credential":"...","profile":"operator","created_at":"..."}
+```
+
+Security guidance:
+
+- Keep `<DATA_DIR>` under a directory that is owned by the local operator.
+- Restrict directory permissions to owner-only access (`0700`), especially when
+  secrets are present in memory snapshots or logs.
+- Keep the credential output from untrusted terminals or logs; it is only ever
+  shown on standard output for this command and should be treated as
+  single-use sensitive material.
+
+Example:
+
+```bash
+chmod 700 /var/lib/pooled-memory
+pooled-memory-admin bootstrap /var/lib/pooled-memory laptop linux host.example.com
+```
+
 ## License
 
 Apache-2.0

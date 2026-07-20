@@ -5,12 +5,14 @@
 //! Devices that prefer local-only memory can use `semantic-memory` directly
 //! without this crate.
 
-pub mod types;
-pub mod store;
 pub mod error;
+#[cfg(feature = "server")]
+pub mod server;
+pub mod store;
+pub mod types;
 
-pub use types::*;
-pub use store::PooledMemoryStore;
 pub use error::PooledMemoryError;
+pub use store::PooledMemoryStore;
+pub use types::*;
 
 pub use semantic_memory;

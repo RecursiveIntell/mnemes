@@ -305,6 +305,8 @@ pub struct Actor {
     pub actor_id: ActorId,
     /// Device through which this actor operates.
     pub device_id: DeviceId,
+    /// MCP tool-grant profile enforced by the server.
+    pub tool_profile: ToolProfile,
     /// Actor implementation class.
     pub actor_kind: ActorKind,
     /// Optional provider and model identifier.
@@ -319,6 +321,7 @@ impl Actor {
         Self {
             actor_id,
             device_id,
+            tool_profile: ToolProfile::default(),
             actor_kind,
             provider_model: None,
             recorded_at: String::new(),
@@ -375,6 +378,41 @@ impl ActorKind {
             "process" => Self::Process,
             _ => Self::Unknown(value),
         }
+    }
+}
+
+/// MCP surface authorization profile granted to an actor on this service.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "lowercase")]
+pub enum ToolProfile {
+    /// Read-only profile: list/read tools only.
+    #[default]
+    Agent,
+    /// Full operational profile: write tools + read tools.
+    Operator,
+}
+
+impl ToolProfile {
+    /// Returns the canonical lower-case name.
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::Operator => "operator",
+        }
+    }
+
+    /// Parses a profile string from common inputs.
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "agent" => Some(Self::Agent),
+            "operator" => Some(Self::Operator),
+            _ => None,
+        }
+    }
+
+    /// Returns true when write tools are available.
+    pub const fn is_full(self) -> bool {
+        matches!(self, Self::Operator)
     }
 }
 
@@ -569,6 +607,27 @@ pub struct LineageResult {
     pub operations: Vec<OperationEnvelope>,
     pub truncated: bool,
     pub as_of: AsOf,
+}
+
+/// Immutable audit event written by the service control plane.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+pub struct AuditEvent {
+    /// Stable event identity.
+    pub event_id: String,
+    /// Device bound to the event, when applicable.
+    pub device_id: Option<String>,
+    /// Actor bound to the event, when applicable.
+    pub actor_id: Option<String>,
+    /// Service endpoint that was used (for example: `POST /v1/operations`).
+    pub endpoint: String,
+    /// Method name (HTTP method or MCP tool name).
+    pub method: String,
+    /// Event outcome (`ok`, `denied`, `error`).
+    pub outcome: String,
+    /// Compact human-readable detail string.
+    pub detail: Option<String>,
+    /// Server time when the event was recorded.
+    pub created_at: String,
 }
 
 #[cfg(test)]
