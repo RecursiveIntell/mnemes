@@ -67,9 +67,9 @@ class Phase4Tools(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d); bindir=root/'bin'; bindir.mkdir(); receipts=root/'receipts'
             codex=bindir/'codex'; codex.write_text('#!/bin/sh\necho fake-codex\nexit 7\n'); codex.chmod(0o755)
-            client=bindir/'client'; client.write_text('#!/bin/sh\ncase "$1" in witnessed-search) echo "{\\"receipt\\":{}}";; submit-operation) echo "{\\"receipt_id\\":\\"r1\\"}";; esac\n'); client.chmod(0o755)
-            e=os.environ.copy(); e.update({'PATH':str(bindir)+':'+e['PATH'],'POOLED_MEMORY_CLIENT':str(client),'POOLED_MEMORY_RECEIPT_DIR':str(receipts),'HOME':d})
+            client=bindir/'client'; client.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CLIENT_ARGS_LOG"\ncase "$1" in witnessed-search) echo "{\\"receipt\\":{}}";; submit-operation) echo "{\\"receipt_id\\":\\"r1\\"}";; esac\n'); client.chmod(0o755)
+            args_log=root/'client-args.log'; e=os.environ.copy(); e.update({'PATH':str(bindir)+':'+e['PATH'],'POOLED_MEMORY_CLIENT':str(client),'POOLED_MEMORY_RECEIPT_DIR':str(receipts),'CLIENT_ARGS_LOG':str(args_log),'HOME':d})
             r=subprocess.run([str(WRAPPER),'--','prompt'],env=e,text=True,capture_output=True)
-            self.assertEqual(r.returncode,7); self.assertTrue(list(receipts.glob('*.receipt.json')))
+            self.assertEqual(r.returncode,7); self.assertTrue(list(receipts.glob('*.receipt.json'))); self.assertIn('--operation-kind observe',args_log.read_text())
 
 if __name__=='__main__': unittest.main()

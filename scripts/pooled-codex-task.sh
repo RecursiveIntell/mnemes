@@ -20,7 +20,7 @@ codex exec "$@" 2>&1 | tee "$transcript"
 rc=${PIPESTATUS[0]}
 digest="sha256:$(sha256sum "$transcript" | cut -d' ' -f1)"
 status=complete; (( rc != 0 )) && status=incomplete
-if "$client" submit-operation --idempotency-key "codex-task:$task_id" --operation-kind execute --target-kind coding_task --target-id "$task_id" --content-digest "$digest" >"$receipt.tmp"; then
+if "$client" submit-operation --idempotency-key "codex-task:$task_id" --operation-kind observe --target-kind coding_task --target-id "$task_id" --content-digest "$digest" >"$receipt.tmp"; then
   python3 - "$task_id" "$status" "$rc" "$digest" "$context" "$transcript" "$receipt.tmp" >"$receipt" <<'PY'
 import json,sys
 id,status,rc,digest,context,transcript,server=sys.argv[1:]
