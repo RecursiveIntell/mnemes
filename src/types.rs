@@ -2,12 +2,15 @@
 //!
 //! Feature: `device-mgmt`.
 
+use chrono::{DateTime, Utc};
 use schemars::JsonSchema;
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use serde_json::Value;
 use std::fmt;
 use std::str::FromStr;
 use uuid::{Uuid, Variant, Version};
 
+use crate::error::PooledMemoryError;
 use semantic_memory::MemoryError;
 
 macro_rules! opaque_uuid_v4 {
@@ -27,7 +30,10 @@ macro_rules! opaque_uuid_v4 {
             pub fn parse(value: impl AsRef<str>) -> Result<Self, MemoryError> {
                 let value = value.as_ref();
                 let parsed = Uuid::parse_str(value).map_err(|error| {
-                    MemoryError::InvalidKey(format!("invalid {} '{value}': {error}", stringify!($name)))
+                    MemoryError::InvalidKey(format!(
+                        "invalid {} '{value}': {error}",
+                        stringify!($name)
+                    ))
                 })?;
                 if parsed.get_version() != Some(Version::Random)
                     || parsed.get_variant() != Variant::RFC4122
@@ -106,6 +112,114 @@ opaque_uuid_v4!(
     OperationId,
     "Opaque, validated UUID v4 identifying an idempotent operation."
 );
+opaque_uuid_v4!(
+    ProvenanceEdgeId,
+    "Opaque, validated UUID v4 identifying a provenance edge event."
+);
+
+/// Stable typed reference for another subsystem identity.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+pub struct MemoryItemRef {
+    /// Node domain kind.
+    pub kind: String,
+    /// Node identity.
+    pub id: String,
+}
+
+impl MemoryItemRef {
+    /// Construct and validate a typed item reference.
+    pub fn new(kind: impl Into<String>, id: impl Into<String>) -> Result<Self, PooledMemoryError> {
+        let kind = kind.into();
+        let id = id.into();
+        if kind.trim().is_empty() {
+            return Err(PooledMemoryError::InvalidProvenance(
+                "memory item kind cannot be empty".to_string(),
+            ));
+        }
+        if id.trim().is_empty() {
+            return Err(PooledMemoryError::InvalidProvenance(
+                "memory item id cannot be empty".to_string(),
+            ));
+        }
+        Ok(Self { kind, id })
+    }
+
+    /// Parse from canonical `kind:id`.
+    pub fn parse_key(value: impl AsRef<str>) -> Result<Self, PooledMemoryError> {
+        let value = value.as_ref();
+        let mut parts = value.splitn(2, ':');
+        let kind = parts.next().unwrap_or_default();
+        let id = parts.next().unwrap_or_default();
+        if kind.is_empty() || id.is_empty() || parts.next().is_some() {
+            return Err(PooledMemoryError::InvalidProvenance(format!(
+                "invalid memory item key '{value}'"
+            )));
+        }
+        Self::new(kind.to_string(), id.to_string())
+    }
+
+    /// Canonical key for map/dictionary operations.
+    pub fn canonical_key(&self) -> String {
+        format!("{}:{}", self.kind, self.id)
+    }
+}
+
+impl fmt::Display for MemoryItemRef {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.canonical_key())
+    }
+}
+
+/// Provenance edge types for append-only lineage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize, JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProvenanceEdgeType {
+    /// observed_by: memory item -> operation/device/actor observation node.
+    ObservedBy,
+    /// recorded_by: memory item -> operation/device/actor recorder node.
+    RecordedBy,
+    /// derived_from: source evidence -> target derived node.
+    DerivedFrom,
+    /// supports: evidence -> claim/item evidence relation.
+    Supports,
+    /// contradicts: evidence -> claim/item contradiction relation.
+    Contradicts,
+    /// supersedes: newer -> prior relation.
+    Supersedes,
+    /// retrieved_from: node from retrieval/import/search operation.
+    RetrievedFrom,
+}
+
+impl ProvenanceEdgeType {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::ObservedBy => "observed_by",
+            Self::RecordedBy => "recorded_by",
+            Self::DerivedFrom => "derived_from",
+            Self::Supports => "supports",
+            Self::Contradicts => "contradicts",
+            Self::Supersedes => "supersedes",
+            Self::RetrievedFrom => "retrieved_from",
+        }
+    }
+
+    pub(crate) fn parse(value: &str, row_id: &str) -> Result<Self, MemoryError> {
+        match value {
+            "observed_by" => Ok(Self::ObservedBy),
+            "recorded_by" => Ok(Self::RecordedBy),
+            "derived_from" => Ok(Self::DerivedFrom),
+            "supports" => Ok(Self::Supports),
+            "contradicts" => Ok(Self::Contradicts),
+            "supersedes" => Ok(Self::Supersedes),
+            "retrieved_from" => Ok(Self::RetrievedFrom),
+            other => Err(MemoryError::CorruptData {
+                table: "provenance_edges",
+                row_id: row_id.to_string(),
+                detail: format!("invalid provenance edge type '{other}'"),
+            }),
+        }
+    }
+}
 
 /// A registered client or server device.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
@@ -363,9 +477,104 @@ impl OperationKind {
     }
 }
 
+/// Bitemporal filter for provenance and lineage queries.
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct AsOf {
+    /// Domain-valid cutoff.
+    pub valid_at: Option<String>,
+    /// Historical recording cutoff.
+    pub recorded_at_or_before: Option<String>,
+}
+
+impl AsOf {
+    pub fn at(valid_at: Option<String>, recorded_at_or_before: Option<String>) -> Self {
+        Self {
+            valid_at,
+            recorded_at_or_before,
+        }
+    }
+
+    pub fn now() -> Self {
+        Self {
+            valid_at: None,
+            recorded_at_or_before: None,
+        }
+    }
+}
+
+/// Request to append one provenance edge.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvenanceEdgeRequest {
+    pub edge_type: ProvenanceEdgeType,
+    pub source: MemoryItemRef,
+    pub target: MemoryItemRef,
+    pub operation_id: Option<OperationId>,
+    pub actor_id: Option<ActorId>,
+    pub device_id: Option<DeviceId>,
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_to: Option<DateTime<Utc>>,
+    pub observed_at: Option<DateTime<Utc>>,
+    /// Caller-provided recorded time for migration/import mode only.
+    pub recorded_at: Option<DateTime<Utc>>,
+    pub content_digest: Option<String>,
+    /// Optional serialized JSON metadata payload.
+    pub metadata: Option<String>,
+    pub supersedes_edge_id: Option<ProvenanceEdgeId>,
+}
+
+/// Persisted provenance edge row.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProvenanceEdge {
+    pub edge_id: ProvenanceEdgeId,
+    pub edge_type: ProvenanceEdgeType,
+    pub source: MemoryItemRef,
+    pub target: MemoryItemRef,
+    pub operation_id: Option<OperationId>,
+    pub actor_id: Option<ActorId>,
+    pub device_id: Option<DeviceId>,
+    pub valid_from: Option<DateTime<Utc>>,
+    pub valid_to: Option<DateTime<Utc>>,
+    pub observed_at: Option<DateTime<Utc>>,
+    pub recorded_at: DateTime<Utc>,
+    pub content_digest: Option<String>,
+    pub metadata: Option<Value>,
+    pub supersedes_edge_id: Option<ProvenanceEdgeId>,
+}
+
+/// Filter request for provenance edge queries.
+#[derive(Debug, Clone, Default)]
+pub struct ProvenanceQuery {
+    pub source: Option<MemoryItemRef>,
+    pub target: Option<MemoryItemRef>,
+    pub edge_types: Vec<ProvenanceEdgeType>,
+    pub operation_id: Option<OperationId>,
+    pub as_of: AsOf,
+    pub include_superseded: bool,
+    pub limit: usize,
+}
+
+/// Lineage traversal result root type.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub enum LineageNode {
+    MemoryItem(MemoryItemRef),
+    Operation(Box<OperationEnvelope>),
+}
+
+/// Result for provenance lineage traversal.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct LineageResult {
+    pub root: MemoryItemRef,
+    pub edges: Vec<ProvenanceEdge>,
+    pub items: Vec<MemoryItemRef>,
+    pub operations: Vec<OperationEnvelope>,
+    pub truncated: bool,
+    pub as_of: AsOf,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, Utc};
 
     #[test]
     fn device_ids_require_uuid_v4_and_round_trip_as_strings() {
@@ -380,5 +589,47 @@ mod tests {
         let kind: ActorKind = serde_json::from_str("\"future-agent\"").unwrap();
         assert_eq!(kind, ActorKind::Unknown("future-agent".to_string()));
         assert_eq!(serde_json::to_string(&kind).unwrap(), "\"future-agent\"");
+    }
+
+    #[test]
+    fn memory_item_ref_is_strict_and_serializes_as_object() {
+        let reference = MemoryItemRef::new("fact", "f-1").unwrap();
+        let encoded = serde_json::to_string(&reference).unwrap();
+        let decoded: MemoryItemRef = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, reference);
+        assert_eq!(reference.canonical_key(), "fact:f-1");
+
+        assert!(MemoryItemRef::new("", "f-1").is_err());
+        assert!(MemoryItemRef::new("fact", "").is_err());
+        assert!(MemoryItemRef::parse_key("no-colon").is_err());
+    }
+
+    #[test]
+    fn provenance_edge_type_round_trip_and_unknown_edge_rejected() {
+        let edge_type = ProvenanceEdgeType::Contradicts;
+        let encoded = serde_json::to_string(&edge_type).unwrap();
+        assert_eq!(encoded, "\"contradicts\"");
+        let decoded: ProvenanceEdgeType = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded, edge_type);
+        assert!(serde_json::from_str::<ProvenanceEdgeType>("\"bogus\"").is_err());
+    }
+
+    #[test]
+    fn provenance_edge_id_is_valid_uuid_v4() {
+        assert!(ProvenanceEdgeId::parse("00000000-0000-0000-0000-000000000000").is_err());
+        let id = ProvenanceEdgeId::new();
+        let encoded = serde_json::to_string(&id).unwrap();
+        let decoded = serde_json::from_str::<ProvenanceEdgeId>(&encoded).unwrap();
+        assert_eq!(decoded, id);
+    }
+
+    #[test]
+    fn as_of_uses_rfc3339_timestamps() {
+        let at = DateTime::parse_from_rfc3339("2026-07-19T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+        let value = AsOf::at(Some(at.to_rfc3339()), Some(at.to_rfc3339()));
+        assert_eq!(value.valid_at.unwrap(), at.to_rfc3339());
+        assert_eq!(value.recorded_at_or_before.unwrap(), at.to_rfc3339());
     }
 }

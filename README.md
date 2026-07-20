@@ -12,6 +12,15 @@ Multi-device pooled memory server with device/actor provenance, bitemporal linea
 - **Bitemporal lineage** — when the observation was made versus when the server recorded it
 - **Server-owned timestamps** — `recorded_at` is always stamped by the accepting server
 
+## Storage boundary
+
+`pooled-memory` is additive metadata on top of `semantic-memory`:
+
+- `pooled.db` — devices, actors, operation envelopes, and provenance edges.
+- `memory.db` (`semantic-memory`) — facts/documents/episodes/chunks/messages/projections, embeddings, search indexes, and semantic content.
+
+`pooled-memory` does **not** duplicate memory payload rows into `pooled.db`.
+
 ## What this crate does NOT do
 
 - It does **not** replace `semantic-memory`. Devices that prefer local-only memory use `semantic-memory` directly without this crate.
@@ -34,7 +43,50 @@ memory.db (semantic-memory canonical store)
   └── search receipts
 ```
 
-The two databases are separate. `pooled.db` owns device/actor/operation metadata. `memory.db` owns memory content through `semantic-memory`.
+The two databases are separate. `pooled.db` owns device/actor/operation and provenance metadata. `memory.db` owns memory content through `semantic-memory`.
+
+### Provenance schema
+
+`provenance_edges` is added as an additive migration table:
+
+```sql
+CREATE TABLE IF NOT EXISTS provenance_edges (
+  edge_id TEXT PRIMARY KEY,
+  edge_type TEXT NOT NULL CHECK (
+    edge_type IN ('observed_by', 'recorded_by', 'derived_from', 'supports',
+                 'contradicts', 'supersedes', 'retrieved_from')
+  ),
+  source_kind TEXT NOT NULL,
+  source_id TEXT NOT NULL,
+  target_kind TEXT NOT NULL,
+  target_id TEXT NOT NULL,
+  operation_id TEXT REFERENCES operation_envelopes(operation_id),
+  actor_id TEXT REFERENCES actors(actor_id),
+  device_id TEXT REFERENCES devices(device_id),
+  valid_from TEXT,
+  valid_to TEXT,
+  observed_at TEXT,
+  recorded_at TEXT NOT NULL,
+  content_digest TEXT,
+  metadata TEXT,
+  supersedes_edge_id TEXT REFERENCES provenance_edges(edge_id),
+  created_at TEXT NOT NULL DEFAULT (datetime('now')),
+  CHECK (length(source_kind) > 0 AND length(source_id) > 0),
+  CHECK (length(target_kind) > 0 AND length(target_id) > 0),
+  CHECK (valid_to IS NULL OR valid_from IS NULL OR valid_to >= valid_from),
+  CHECK (metadata IS NULL OR json_valid(metadata)),
+  CHECK (source_kind || ':' || source_id <> target_kind || ':' || target_id)
+);
+```
+
+The bitemporal query predicate is:
+
+```sql
+recorded_at <= :as_of_recorded
+AND (:as_of_valid IS NULL OR
+     ((valid_from IS NULL OR valid_from <= :as_of_valid)
+      AND (valid_to IS NULL OR :as_of_valid < valid_to)))
+```
 
 ## Quick start
 

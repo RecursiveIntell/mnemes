@@ -18,6 +18,15 @@ pub enum PooledMemoryError {
     #[error("database error: {0}")]
     Database(String),
 
+    #[error("provenance edge not found: {0}")]
+    ProvenanceEdgeNotFound(String),
+
+    #[error("invalid provenance request: {0}")]
+    InvalidProvenance(String),
+
+    #[error("invalid as-of filter: {0}")]
+    InvalidAsOf(String),
+
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 
