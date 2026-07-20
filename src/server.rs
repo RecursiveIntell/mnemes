@@ -1989,7 +1989,12 @@ async fn mcp_handler(
                             PooledMemoryError::InvalidAsOf("invalid sm_get_device args".to_string())
                         })?;
                         let device_id = parse_device_id(&tool_request.device_id)?;
-                        if device_id != context.device.device_id {
+                        if device_id != context.device.device_id
+                            && context
+                                .actor
+                                .as_ref()
+                                .map_or(true, |actor| actor.tool_profile != ToolProfile::Operator)
+                        {
                             return Err(PooledMemoryError::AuthorizationDenied(
                                 "device mismatch".to_string(),
                             ));
@@ -2230,11 +2235,6 @@ async fn mcp_handler(
                             )
                         })?;
                         let device_id = parse_device_id(&tool_request.device_id)?;
-                        if device_id != context.device.device_id {
-                            return Err(PooledMemoryError::AuthorizationDenied(
-                                "device mismatch".to_string(),
-                            ));
-                        }
                         state.store.revoke_device(&device_id).await?;
                         json!({"status":"revoked","device_id":device_id.to_string()})
                     }
@@ -2246,11 +2246,6 @@ async fn mcp_handler(
                             )
                         })?;
                         let device_id = parse_device_id(&tool_request.device_id)?;
-                        if device_id != context.device.device_id {
-                            return Err(PooledMemoryError::AuthorizationDenied(
-                                "device mismatch".to_string(),
-                            ));
-                        }
                         let credential = state.store.rotate_device_credential(&device_id).await?;
                         json!({"device_id":device_id.to_string(),"credential":credential})
                     }
@@ -2262,11 +2257,6 @@ async fn mcp_handler(
                                 )
                             })?;
                         let device_id = parse_device_id(&tool_request.device_id)?;
-                        if device_id != context.device.device_id {
-                            return Err(PooledMemoryError::AuthorizationDenied(
-                                "device mismatch".to_string(),
-                            ));
-                        }
                         let actor = crate::types::Actor {
                             actor_id: crate::types::ActorId::new(),
                             device_id,

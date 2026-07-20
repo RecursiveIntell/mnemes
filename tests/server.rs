@@ -500,6 +500,40 @@ async fn mcp_read_and_operator_tools_are_store_backed() {
     .await;
     assert!(created_device["device_id"].as_str().is_some());
     assert!(created_device["credential"].as_str().is_some());
+    let child_device_id = created_device["device_id"].as_str().unwrap();
+
+    let child_actor = mcp_call(
+        &client,
+        &server,
+        &device.credential,
+        &operator.actor_id,
+        "sm_register_actor",
+        json!({"device_id": child_device_id, "actor_kind": "codex", "tool_profile": "agent"}),
+    )
+    .await;
+    assert!(child_actor["actor_id"].as_str().is_some());
+
+    let child_rotated = mcp_call(
+        &client,
+        &server,
+        &device.credential,
+        &operator.actor_id,
+        "sm_rotate_device_key",
+        json!({"device_id": child_device_id}),
+    )
+    .await;
+    assert!(child_rotated["credential"].as_str().is_some());
+
+    let child_revoked = mcp_call(
+        &client,
+        &server,
+        &device.credential,
+        &operator.actor_id,
+        "sm_revoke_device",
+        json!({"device_id": child_device_id}),
+    )
+    .await;
+    assert_eq!(child_revoked["status"], "revoked");
 
     let rotated = mcp_call(
         &client,
