@@ -1809,6 +1809,52 @@ async fn run_witnessed_search(
         .as_ref()
         .map(|values| parse_operation_source_types(values))
         .transpose()?;
+
+    // Check if sharded mode is active
+    let has_shards = state.store.has_shards().await?;
+
+    if has_shards {
+        // Routed path: delegate to MnemesStore::routed_search which handles
+        // shard selection, parallel search, merge, conflict scanning, and
+        // routing receipt persistence.
+        let routing_request = crate::shards::RoutingSearchRequest {
+            query: request.query.clone(),
+            top_k: request.limit.unwrap_or(10),
+            namespaces: request.namespaces.clone(),
+            source_types: source_types.as_ref().map(|st| st.to_vec()),
+            shard_budget: None,
+            exhaustive: false,
+        };
+
+        // Use the first registered device as requester.
+        // TODO: bind to the authenticated device from authorize() context.
+        let devices = state.store.list_devices().await?;
+        let requester = devices
+            .first()
+            .map(|d| d.device_id.clone())
+            .unwrap_or_else(DeviceId::new);
+
+        let routed = state
+            .store
+            .routed_search(&requester, routing_request)
+            .await?;
+
+        let results = routed
+            .results
+            .into_iter()
+            .map(|r| {
+                result_from_operation_source(r.result.source, r.result.content, r.result.score)
+            })
+            .collect::<Vec<_>>();
+
+        return Ok(WitnessedSearchResponse {
+            results,
+            receipt: None,
+            receipt_stored: false,
+        });
+    }
+
+    // Legacy fallback: no shards registered (test/single-device mode)
     let mut context = SearchContext::default_now();
     context.receipt_mode = ReceiptMode::ReturnReceipt;
     context.exactness_profile = ExactnessProfile::PreferExact;

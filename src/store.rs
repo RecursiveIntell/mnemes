@@ -1624,6 +1624,17 @@ impl MnemesStore {
             .ok_or_else(|| MnemesError::DeviceNotFound(device_id.to_string()))
     }
 
+    /// Quick check whether any active shards with facts are registered.
+    pub async fn has_shards(&self) -> Result<bool, MnemesError> {
+        let conn = self.pool_conn.lock().await;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM device_shards WHERE state = 'active' AND fact_count > 0",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
     /// Aggregate derived catalog counts without opening any shard.
     pub async fn aggregate_shard_stats(&self) -> Result<ShardAggregateStats, MnemesError> {
         let conn = self.pool_conn.lock().await;
