@@ -43,6 +43,7 @@ pub const SCHEMA_VERSION: &str = "mnemes.server.v1";
 pub struct ServerState {
     store: Arc<MnemesStore>,
     server_id: String,
+    trusted_keys: Arc<crate::replication::TrustedKeyRegistry>,
 }
 
 #[cfg(feature = "server")]
@@ -367,6 +368,7 @@ pub fn build_router(store: MnemesStore) -> Router {
     build_router_with_state(ServerState {
         store: Arc::new(store),
         server_id: Uuid::new_v4().to_string(),
+        trusted_keys: Arc::new(crate::replication::TrustedKeyRegistry::new()),
     })
 }
 
@@ -1903,10 +1905,27 @@ async fn sync_endpoint(
         Ok(ctx) => ctx,
         Err(error) => return error_response(&error),
     };
-    let registry = crate::replication::TrustedKeyRegistry::new();
-    let base = state.store.base_dir().to_path_buf();
-    let dispatch = |_conn: &rusqlite::Connection, _kind: &str, _payload: &[u8]| Ok(());
-    match crate::sync_handler::process_sync_request(request, &registry, &base, &dispatch) {
+    // Replicas live under base_dir/replicas/{store_id}.db
+    let replica_base = state.store.base_dir().join("replicas");
+    std::fs::create_dir_all(&replica_base).ok();
+    // Dispatch: replay raw SQL payload against the replica connection.
+    // The payload is a hex-encoded raw journal entry (SQL statements to
+    // replay the semantic-memory mutation against the replica DB).
+    let dispatch = |conn: &rusqlite::Connection, _kind: &str, payload: &[u8]| {
+        // Decode payload as UTF-8 SQL batch and execute it
+        let sql = std::str::from_utf8(payload).map_err(|e| {
+            MnemesError::Replication(format!("payload not valid UTF-8 SQL: {e}"))
+        })?;
+        conn.execute_batch(sql).map_err(|e| {
+            MnemesError::Replication(format!("replay SQL batch failed: {e}"))
+        })
+    };
+    match crate::sync_handler::process_sync_request(
+        request,
+        &state.trusted_keys,
+        &replica_base,
+        &dispatch,
+    ) {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(error) => error_response(&error),
     }

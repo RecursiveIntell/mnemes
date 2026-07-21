@@ -1,18 +1,18 @@
 [Unit]
-Description=Pooled Memory authority service
+Description=Mnemes memory authority service
 After=network.target
 
 [Service]
 Type=simple
-EnvironmentFile=%h/.config/pooled-memory/server.env
-ExecStart=%h/.local/bin/pooled-memory-server ${POOLED_MEMORY_PORT} ${POOLED_MEMORY_DATA_DIR}
+EnvironmentFile=%h/.config/mnemes/server.env
+ExecStart=%h/.cargo/bin/mnemes-server ${MNEME_PORT} ${MNEME_DATA_DIR}
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/.local/share/pooled-memory
+ReadWritePaths=%h/.local/share/mnemes
 LockPersonality=true
 RestrictSUIDSGID=true
 

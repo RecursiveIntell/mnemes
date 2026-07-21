@@ -59,10 +59,10 @@ This matches the local-first goals described by Ink & Switch—offline work, mul
 | Device semantic content and history | `semantic-memory` on the home device | Canonical |
 | Device mutation journal | `semantic-memory` on the home device | Canonical change witness |
 | Server copy of a device store | Replayable per-device replica | Durable derived copy |
-| Device identity, lifecycle, actors, grants | `pooled-memory` control plane | Canonical pooling metadata |
-| Sync watermarks, gaps, acknowledgements, receipts | `pooled-memory` | Canonical synchronization evidence |
-| Routing summaries and summary embeddings | `pooled-memory` | Rebuildable projection |
-| Sparse route and global merge receipt | `pooled-memory` | Durable query witness |
+| Device identity, lifecycle, actors, grants | `mnemes` control plane | Canonical pooling metadata |
+| Sync watermarks, gaps, acknowledgements, receipts | `mnemes` | Canonical synchronization evidence |
+| Routing summaries and summary embeddings | `mnemes` | Rebuildable projection |
+| Sparse route and global merge receipt | `mnemes` | Durable query witness |
 | Server-originated request to change a device store | Device inbox proposal | Not admitted until home device accepts it |
 | Claims/evidence adjudication | Adopted claim/evidence authority | Separate from retrieval and sync |
 
@@ -547,7 +547,7 @@ A signed redaction/forgetting envelope binds `redaction_id`, origin/item identit
 
 ### Existing work retained
 
-Current `pooled-memory` already supplies:
+Current `mnemes` already supplies:
 
 - device and actor identity;
 - lifecycle states;
@@ -576,7 +576,7 @@ A static audit on 2026-07-20 found 40 public async mutation candidates in `seman
 - Add snapshot identity/sequence APIs.
 - Add mutation-coverage conformance tests.
 
-#### `pooled-memory`
+#### `mnemes`
 
 - Reclassify `device_shards` as device primaries plus server replica records.
 - Replace ordinary writable shard handles with mechanically read-only `ReplicaStore` query handles and a separate `ReplicaApplier`; prove direct server-side semantic mutation fails.

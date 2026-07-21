@@ -24,7 +24,7 @@ if "$client" submit-operation --idempotency-key "codex-task:$task_id" --operatio
   python3 - "$task_id" "$status" "$rc" "$digest" "$context" "$transcript" "$receipt.tmp" >"$receipt" <<'PY'
 import json,sys
 id,status,rc,digest,context,transcript,server=sys.argv[1:]
-print(json.dumps({'schema':'pooled-codex-task-receipt.v1','task_id':id,'status':status,'codex_exit_code':int(rc),'content_digest':digest,'context_receipt_path':context,'transcript_path':transcript,'server_receipt':json.load(open(server))},sort_keys=True,indent=2))
+print(json.dumps({'schema':'mneme-codex-task-receipt.v1','task_id':id,'status':status,'codex_exit_code':int(rc),'content_digest':digest,'context_receipt_path':context,'transcript_path':transcript,'server_receipt':json.load(open(server))},sort_keys=True,indent=2))
 PY
   rm -f "$receipt.tmp"
 else

@@ -31,7 +31,7 @@ fn envelope() -> MemoryMutationEnvelopeV1 {
 // Helper: admit the signing key used by a signed_envelope
 // ---------------------------------------------------------------------------
 fn admit_for_envelope(registry: &mut TrustedKeyRegistry, envelope: &MemoryMutationEnvelopeV1) {
-    registry.admit(TrustedKeyRecord {
+    let _ = registry.admit(TrustedKeyRecord {
         signer_principal_id: envelope.signer_principal_id.clone(),
         signer_key_version: envelope.signer_key_version,
         public_key: envelope.signer_public_key,
@@ -432,7 +432,7 @@ fn mismatched_public_key_is_rejected() {
     let mut registry = TrustedKeyRegistry::new();
     // Admit with a DIFFERENT public key
     let other_key = SigningKey::generate(&mut OsRng);
-    registry.admit(TrustedKeyRecord {
+    let _ = registry.admit(TrustedKeyRecord {
         signer_principal_id: envelope.signer_principal_id.clone(),
         signer_key_version: envelope.signer_key_version,
         public_key: other_key.verifying_key().to_bytes(),
@@ -458,7 +458,7 @@ fn mismatched_public_key_is_rejected() {
 fn revoked_key_is_rejected() {
     let (envelope, _key) = signed_envelope();
     let mut registry = TrustedKeyRegistry::new();
-    registry.admit(TrustedKeyRecord {
+    let _ = registry.admit(TrustedKeyRecord {
         signer_principal_id: envelope.signer_principal_id.clone(),
         signer_key_version: envelope.signer_key_version,
         public_key: envelope.signer_public_key,
@@ -484,7 +484,7 @@ fn revoked_key_is_rejected() {
 fn key_before_activation_window_is_rejected() {
     let (envelope, _key) = signed_envelope();
     let mut registry = TrustedKeyRegistry::new();
-    registry.admit(TrustedKeyRecord {
+    let _ = registry.admit(TrustedKeyRecord {
         signer_principal_id: envelope.signer_principal_id.clone(),
         signer_key_version: envelope.signer_key_version,
         public_key: envelope.signer_public_key,
@@ -510,7 +510,7 @@ fn key_before_activation_window_is_rejected() {
 fn key_past_cutoff_window_is_rejected() {
     let (envelope, _key) = signed_envelope();
     let mut registry = TrustedKeyRegistry::new();
-    registry.admit(TrustedKeyRecord {
+    let _ = registry.admit(TrustedKeyRecord {
         signer_principal_id: envelope.signer_principal_id.clone(),
         signer_key_version: envelope.signer_key_version,
         public_key: envelope.signer_public_key,
@@ -536,7 +536,7 @@ fn key_past_cutoff_window_is_rejected() {
 fn scope_mismatch_home_device_id_is_rejected() {
     let (envelope, _key) = signed_envelope();
     let mut registry = TrustedKeyRegistry::new();
-    registry.admit(TrustedKeyRecord {
+    let _ = registry.admit(TrustedKeyRecord {
         signer_principal_id: envelope.signer_principal_id.clone(),
         signer_key_version: envelope.signer_key_version,
         public_key: envelope.signer_public_key,
@@ -567,7 +567,7 @@ fn scope_mismatch_home_device_id_is_rejected() {
 fn scope_mismatch_store_id_is_rejected() {
     let (envelope, _key) = signed_envelope();
     let mut registry = TrustedKeyRegistry::new();
-    registry.admit(TrustedKeyRecord {
+    let _ = registry.admit(TrustedKeyRecord {
         signer_principal_id: envelope.signer_principal_id.clone(),
         signer_key_version: envelope.signer_key_version,
         public_key: envelope.signer_public_key,
@@ -595,7 +595,7 @@ fn scope_mismatch_store_id_is_rejected() {
 fn role_mismatch_is_rejected() {
     let (envelope, _key) = signed_envelope();
     let mut registry = TrustedKeyRegistry::new();
-    registry.admit(TrustedKeyRecord {
+    let _ = registry.admit(TrustedKeyRecord {
         signer_principal_id: envelope.signer_principal_id.clone(),
         signer_key_version: envelope.signer_key_version,
         public_key: envelope.signer_public_key,
@@ -627,7 +627,7 @@ fn artifact_permission_mismatch_is_rejected() {
 
     let mut registry = TrustedKeyRegistry::new();
     // Admit with wrong artifact permission (Mutation instead of Bootstrap)
-    registry.admit(TrustedKeyRecord {
+    let _ = registry.admit(TrustedKeyRecord {
         signer_principal_id: envelope.signer_principal_id.clone(),
         signer_key_version: envelope.signer_key_version,
         public_key: envelope.signer_public_key,

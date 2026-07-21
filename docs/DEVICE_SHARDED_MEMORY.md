@@ -11,7 +11,7 @@ BASE/pooled.db
 BASE/memory/shards/<device_uuid>/memory.db
 ```
 
-`semantic-memory` remains the engine owner of facts, documents, chunks, messages, embeddings, authority state, and child search receipts inside each shard. Under the target architecture, the home-device copy is canonical and this server-side file is its replica. `pooled-memory` owns device lifecycle, synchronization evidence, the derived shard catalog, sparse routing, global merge, and cross-shard routing receipts.
+`semantic-memory` remains the engine owner of facts, documents, chunks, messages, embeddings, authority state, and child search receipts inside each shard. Under the target architecture, the home-device copy is canonical and this server-side file is its replica. `mnemes` owns device lifecycle, synchronization evidence, the derived shard catalog, sparse routing, global merge, and cross-shard routing receipts.
 
 The active sharded runtime refuses to start if `BASE/memory/memory.db` exists. A legacy global store may exist only in a sealed rollback generation outside the live runtime directory.
 

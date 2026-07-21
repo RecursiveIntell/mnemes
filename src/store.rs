@@ -369,8 +369,17 @@ impl MnemesStore {
         embedder: Arc<dyn semantic_memory::Embedder>,
         cache_capacity: usize,
     ) -> Result<Self, MnemesError> {
-        // Legacy check relaxed: existing DB used as primary store
-        let _legacy_global = base_dir.join("memory").join("memory.db");
+        // Reject a pre-existing legacy global memory.db in the active tree.
+        // The shard architecture requires all semantic content to live under
+        // memory/shards/<device_uuid>/memory.db. A memory/memory.db at the
+        // top level indicates an old non-sharded layout that must be migrated
+        // before the store can be opened.
+        let legacy_global = base_dir.join("memory").join("memory.db");
+        if legacy_global.exists() {
+            return Err(MnemesError::LegacyGlobalStorePresent(
+                legacy_global.display().to_string(),
+            ));
+        }
         std::fs::create_dir_all(&base_dir)?;
         // Create the shard root before schema initialization. The schema
         // transaction records catalog rows, while these directories are the
