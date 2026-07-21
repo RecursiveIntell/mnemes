@@ -5,7 +5,7 @@ use tempfile::TempDir;
 #[test]
 fn bootstrap_cli_accepts_documented_arguments_and_rejects_second_bootstrap() {
     let dir = TempDir::new().unwrap();
-    let bin = env!("CARGO_BIN_EXE_pooled-memory-admin");
+    let bin = env!("CARGO_BIN_EXE_mnemes-admin");
 
     let first = Command::new(bin)
         .args([
@@ -46,7 +46,7 @@ fn bootstrap_cli_accepts_documented_arguments_and_rejects_second_bootstrap() {
 #[test]
 fn bootstrap_cli_accepts_default_actor_kind() {
     let dir = TempDir::new().unwrap();
-    let output = Command::new(env!("CARGO_BIN_EXE_pooled-memory-admin"))
+    let output = Command::new(env!("CARGO_BIN_EXE_mnemes-admin"))
         .args([
             "bootstrap",
             dir.path().to_str().unwrap(),

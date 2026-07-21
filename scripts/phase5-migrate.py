@@ -9,7 +9,7 @@ DERIVED_PREFIXES=("sqlite_","chunks_fts","facts_fts","messages_fts","episodes_ft
 DERIVED_TABLES={"hnsw_keymap","hnsw_metadata","pending_index_ops","facts_rowid_map","chunks_rowid_map","messages_rowid_map","episodes_rowid_map","embedding_metadata","derived_vector_artifacts","derived_vector_artifact_generations"}
 SINGLETON_WINNERS={"authority_state","routing_policy"}
 MERGE_TABLE="search_receipts"
-SCHEMA="pooled-memory.migration-envelope.v1"
+SCHEMA="mnemes.migration-envelope.v1"
 
 class MigrationError(RuntimeError): pass
 
@@ -98,7 +98,7 @@ def reconcile(args):
   before=c.execute(f"select count(*) from {qident(MERGE_TABLE)}").fetchone()[0]; c.execute(sql); after=c.execute(f"select count(*) from {qident(MERGE_TABLE)}").fetchone()[0]; c.commit(); c.execute("detach database secondary")
   if quick(c)!="ok": raise MigrationError("merged quick_check failed")
  finally:c.close()
- ledger={"schema":"pooled-memory.reconciliation-ledger.v1","created_at":now(),"primary":str(p),"secondary":str(s),"primary_sha256":sha(p),"secondary_sha256":sha(s),"winner_policy":"primary strict-superset; newer authority/routing projection wins","merged_search_receipts":after-before,"comparisons":comparisons,"projection_conflicts":conflicts}
+ ledger={"schema":"mnemes.reconciliation-ledger.v1","created_at":now(),"primary":str(p),"secondary":str(s),"primary_sha256":sha(p),"secondary_sha256":sha(s),"winner_policy":"primary strict-superset; newer authority/routing projection wins","merged_search_receipts":after-before,"comparisons":comparisons,"projection_conflicts":conflicts}
  atomic_json(args.ledger,ledger); m=manifest(out,"reconciled"); m["reconciliation_ledger_sha256"]=sha(Path(args.ledger)); atomic_json(str(out)+".manifest.json",m); print(json.dumps({"merged":str(out),"merged_search_receipts":after-before,"db_sha256":m["db_sha256"],"row_root_sha256":m["row_root_sha256"]},sort_keys=True))
 def verify(args):
  m=manifest(Path(args.db),args.source); expected=json.load(open(args.manifest)) if args.manifest else None

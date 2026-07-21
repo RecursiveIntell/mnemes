@@ -1,7 +1,7 @@
 #[cfg(feature = "server")]
 use crate::{
     Actor, ActorId, Device, DeviceId, OperationEnvelope, OperationId, OperationKind,
-    PooledMemoryError, PooledMemoryStore, ToolProfile,
+    MnemesError, MnemesStore, ToolProfile,
 };
 #[cfg(feature = "server")]
 use axum::{
@@ -36,12 +36,12 @@ use tower_http::timeout::TimeoutLayer;
 use uuid::Uuid;
 
 #[cfg(feature = "server")]
-pub const SCHEMA_VERSION: &str = "pooled-memory.server.v1";
+pub const SCHEMA_VERSION: &str = "mnemes.server.v1";
 
 #[cfg(feature = "server")]
 #[derive(Clone)]
 pub struct ServerState {
-    store: Arc<PooledMemoryStore>,
+    store: Arc<MnemesStore>,
     server_id: String,
 }
 
@@ -363,7 +363,7 @@ struct OperationInfo {
 }
 
 #[cfg(feature = "server")]
-pub fn build_router(store: PooledMemoryStore) -> Router {
+pub fn build_router(store: MnemesStore) -> Router {
     build_router_with_state(ServerState {
         store: Arc::new(store),
         server_id: Uuid::new_v4().to_string(),
@@ -398,6 +398,7 @@ fn build_router_with_state(state: ServerState) -> Router {
         )
         .route("/v1/operations/:operation_id", get(get_operation_handler))
         .route("/v1/search/witnessed", post(search_witnessed_handler))
+        .route("/v1/sync", post(sync_endpoint))
         .route("/v1/receipts/:receipt_id", get(get_receipt_handler))
         .route("/v1/audit/events", get(list_audit_events_handler))
         .route("/mcp", post(mcp_handler))
@@ -412,31 +413,31 @@ fn build_router_with_state(state: ServerState) -> Router {
 }
 
 #[cfg(feature = "server")]
-fn bearer_token(headers: &HeaderMap) -> Result<String, PooledMemoryError> {
+fn bearer_token(headers: &HeaderMap) -> Result<String, MnemesError> {
     let value = headers
         .get("authorization")
-        .ok_or(PooledMemoryError::InvalidCredential)?;
+        .ok_or(MnemesError::InvalidCredential)?;
     let raw = value
         .to_str()
-        .map_err(|_| PooledMemoryError::InvalidCredential)?;
+        .map_err(|_| MnemesError::InvalidCredential)?;
     if !raw.starts_with("Bearer ") {
-        return Err(PooledMemoryError::InvalidCredential);
+        return Err(MnemesError::InvalidCredential);
     }
     let token = raw.trim_start_matches("Bearer ").trim();
     if token.is_empty() {
-        return Err(PooledMemoryError::InvalidCredential);
+        return Err(MnemesError::InvalidCredential);
     }
     Ok(token.to_string())
 }
 
 #[cfg(feature = "server")]
-fn parse_device_id(raw: &str) -> Result<DeviceId, PooledMemoryError> {
-    DeviceId::parse(raw).map_err(|_| PooledMemoryError::DeviceNotFound(raw.to_string()))
+fn parse_device_id(raw: &str) -> Result<DeviceId, MnemesError> {
+    DeviceId::parse(raw).map_err(|_| MnemesError::DeviceNotFound(raw.to_string()))
 }
 
 #[cfg(feature = "server")]
-fn parse_actor_id(raw: &str) -> Result<ActorId, PooledMemoryError> {
-    ActorId::parse(raw).map_err(|_| PooledMemoryError::InvalidAsOf("invalid actor id".to_string()))
+fn parse_actor_id(raw: &str) -> Result<ActorId, MnemesError> {
+    ActorId::parse(raw).map_err(|_| MnemesError::InvalidAsOf("invalid actor id".to_string()))
 }
 
 #[cfg(feature = "server")]
@@ -444,7 +445,7 @@ async fn authorize(
     state: &ServerState,
     headers: &HeaderMap,
     actor_id: Option<ActorId>,
-) -> Result<ServerContext, PooledMemoryError> {
+) -> Result<ServerContext, MnemesError> {
     let token = bearer_token(headers)?;
     let actor_ref = actor_id.as_ref();
     let (device, actor) = state.store.authenticate_request(&token, actor_ref).await?;
@@ -452,15 +453,15 @@ async fn authorize(
 }
 
 #[cfg(feature = "server")]
-fn map_store_error(error: &PooledMemoryError) -> (StatusCode, &'static str, &'static str) {
+fn map_store_error(error: &MnemesError) -> (StatusCode, &'static str, &'static str) {
     match error {
-        PooledMemoryError::InvalidCredential => {
+        MnemesError::InvalidCredential => {
             (StatusCode::UNAUTHORIZED, "invalid credentials", "denied")
         }
-        PooledMemoryError::DeviceNotActive(_) | PooledMemoryError::AuthorizationDenied(_) => {
+        MnemesError::DeviceNotActive(_) | MnemesError::AuthorizationDenied(_) => {
             (StatusCode::FORBIDDEN, "access denied", "denied")
         }
-        PooledMemoryError::DeviceNotFound(_) | PooledMemoryError::ActorNotFound(_) => {
+        MnemesError::DeviceNotFound(_) | MnemesError::ActorNotFound(_) => {
             (StatusCode::NOT_FOUND, "not found", "error")
         }
         _ => (StatusCode::BAD_REQUEST, "invalid request", "error"),
@@ -468,7 +469,7 @@ fn map_store_error(error: &PooledMemoryError) -> (StatusCode, &'static str, &'st
 }
 
 #[cfg(feature = "server")]
-fn unauthorized_rpc(error: PooledMemoryError, id: Option<Value>) -> Response {
+fn unauthorized_rpc(error: MnemesError, id: Option<Value>) -> Response {
     let (status, message, _) = map_store_error(&error);
     let code = match status {
         StatusCode::UNAUTHORIZED => -32000,
@@ -511,17 +512,17 @@ async fn log_audit(
 }
 
 #[cfg(feature = "server")]
-fn error_response(error: &PooledMemoryError) -> Response {
+fn error_response(error: &MnemesError) -> Response {
     let (status, message, _) = map_store_error(error);
     (status, Json(ErrorResponse { error: message })).into_response()
 }
 
 #[cfg(feature = "server")]
-fn ensure_operator(actor: Option<&Actor>) -> Result<(), PooledMemoryError> {
+fn ensure_operator(actor: Option<&Actor>) -> Result<(), MnemesError> {
     let actor = actor
-        .ok_or_else(|| PooledMemoryError::AuthorizationDenied("actor required".to_string()))?;
+        .ok_or_else(|| MnemesError::AuthorizationDenied("actor required".to_string()))?;
     if actor.tool_profile != ToolProfile::Operator {
-        return Err(PooledMemoryError::AuthorizationDenied(
+        return Err(MnemesError::AuthorizationDenied(
             "operator profile required".to_string(),
         ));
     }
@@ -611,7 +612,7 @@ async fn integrity_handler(headers: HeaderMap, State(state): State<ServerState>)
                 Some("verify failed"),
             )
             .await;
-            return error_response(&PooledMemoryError::Memory(error));
+            return error_response(&MnemesError::Memory(error));
         }
     };
 
@@ -640,9 +641,26 @@ async fn integrity_handler(headers: HeaderMap, State(state): State<ServerState>)
 
 #[cfg(feature = "server")]
 async fn register_device_handler(
+    headers: HeaderMap,
     State(state): State<ServerState>,
     Json(payload): Json<RegisterDeviceRequest>,
 ) -> Response {
+    match std::env::var("BOOTSTRAP_SECRET") {
+        Ok(secret) => match bearer_token(&headers) {
+            Ok(token) if token == secret => {}
+            _ => return error_response(&MnemesError::InvalidCredential),
+        },
+        Err(std::env::VarError::NotPresent) => match state.store.count_devices().await {
+            Ok(0) => {}
+            Ok(_) => {
+                return error_response(&MnemesError::AuthorizationDenied(
+                    "registration closed".to_string(),
+                ))
+            }
+            Err(error) => return error_response(&error),
+        },
+        Err(_) => return error_response(&MnemesError::InvalidCredential),
+    }
     let new_device = crate::types::Device::new(
         crate::types::DeviceId::new(),
         payload.label,
@@ -662,7 +680,7 @@ async fn register_device_handler(
     let device = match state.store.get_device(&device_id).await {
         Ok(Some(device)) => device,
         Ok(None) => {
-            return error_response(&PooledMemoryError::DeviceNotFound(device_id.to_string()));
+            return error_response(&MnemesError::DeviceNotFound(device_id.to_string()));
         }
         Err(error) => return error_response(&error),
     };
@@ -753,7 +771,7 @@ async fn heartbeat_handler(
     };
 
     if context.device.device_id != device_id {
-        return error_response(&PooledMemoryError::AuthorizationDenied(
+        return error_response(&MnemesError::AuthorizationDenied(
             "device mismatch".to_string(),
         ));
     }
@@ -809,7 +827,7 @@ async fn rotate_device_handler(
     };
 
     if context.device.device_id != device_id {
-        return error_response(&PooledMemoryError::AuthorizationDenied(
+        return error_response(&MnemesError::AuthorizationDenied(
             "device mismatch".to_string(),
         ));
     }
@@ -868,7 +886,7 @@ async fn revoke_device_handler(
     };
 
     if context.device.device_id != device_id {
-        return error_response(&PooledMemoryError::AuthorizationDenied(
+        return error_response(&MnemesError::AuthorizationDenied(
             "device mismatch".to_string(),
         ));
     }
@@ -924,7 +942,7 @@ async fn quarantine_device_handler(
     };
 
     if context.device.device_id != device_id {
-        return error_response(&PooledMemoryError::AuthorizationDenied(
+        return error_response(&MnemesError::AuthorizationDenied(
             "device mismatch".to_string(),
         ));
     }
@@ -1038,7 +1056,7 @@ async fn register_actor_handler(
     };
 
     if context.device.device_id != device_id {
-        return error_response(&PooledMemoryError::AuthorizationDenied(
+        return error_response(&MnemesError::AuthorizationDenied(
             "device mismatch".to_string(),
         ));
     }
@@ -1084,7 +1102,7 @@ async fn register_actor_handler(
 }
 
 #[cfg(feature = "server")]
-fn parse_operation_kind(value: &str) -> Result<OperationKind, PooledMemoryError> {
+fn parse_operation_kind(value: &str) -> Result<OperationKind, MnemesError> {
     match value {
         "observe" => Ok(OperationKind::Observe),
         "assert" => Ok(OperationKind::Assert),
@@ -1092,7 +1110,7 @@ fn parse_operation_kind(value: &str) -> Result<OperationKind, PooledMemoryError>
         "revoke" => Ok(OperationKind::Revoke),
         "redact" => Ok(OperationKind::Redact),
         "adjudicate" => Ok(OperationKind::Adjudicate),
-        _ => Err(PooledMemoryError::InvalidAsOf(
+        _ => Err(MnemesError::InvalidAsOf(
             "invalid operation kind".to_string(),
         )),
     }
@@ -1120,7 +1138,7 @@ async fn submit_operation_handler(
     };
 
     if context.device.device_id != device_id {
-        return error_response(&PooledMemoryError::AuthorizationDenied(
+        return error_response(&MnemesError::AuthorizationDenied(
             "device mismatch".to_string(),
         ));
     }
@@ -1187,7 +1205,7 @@ async fn submit_operation_handler(
     {
         Ok(Some(envelope)) => envelope,
         Ok(None) => {
-            return error_response(&PooledMemoryError::InvalidAsOf(
+            return error_response(&MnemesError::InvalidAsOf(
                 "operation not found".to_string(),
             ))
         }
@@ -1302,7 +1320,7 @@ async fn get_operation_handler(
     let operation_id = match parse_id(&operation_id) {
         Some(value) => value,
         None => {
-            return error_response(&PooledMemoryError::InvalidAsOf(
+            return error_response(&MnemesError::InvalidAsOf(
                 "invalid operation id".to_string(),
             ))
         }
@@ -1316,7 +1334,7 @@ async fn get_operation_handler(
     let envelope = match state.store.get_operation(&operation_id).await {
         Ok(Some(value)) => value,
         Ok(None) => {
-            return error_response(&PooledMemoryError::InvalidAsOf(
+            return error_response(&MnemesError::InvalidAsOf(
                 "operation not found".to_string(),
             ))
         }
@@ -1373,7 +1391,7 @@ async fn get_receipt_handler(
     let envelope = match state.store.get_operation_by_receipt(&receipt_id).await {
         Ok(Some(envelope)) => envelope,
         Ok(None) => {
-            return error_response(&PooledMemoryError::InvalidAsOf(
+            return error_response(&MnemesError::InvalidAsOf(
                 "receipt not found".to_string(),
             ))
         }
@@ -1671,15 +1689,15 @@ fn hidden_tool(name: &str) -> bool {
 #[cfg(feature = "server")]
 fn parse_tool_call(
     params: Option<&Value>,
-) -> Result<(Option<String>, String, Value), PooledMemoryError> {
+) -> Result<(Option<String>, String, Value), MnemesError> {
     let params_obj = params
         .and_then(Value::as_object)
-        .ok_or_else(|| PooledMemoryError::InvalidAsOf("params must be object".to_string()))?;
+        .ok_or_else(|| MnemesError::InvalidAsOf("params must be object".to_string()))?;
 
     let name = params_obj
         .get("name")
         .and_then(Value::as_str)
-        .ok_or_else(|| PooledMemoryError::InvalidAsOf("missing tool name".to_string()))?
+        .ok_or_else(|| MnemesError::InvalidAsOf("missing tool name".to_string()))?
         .to_string();
     let actor_id = params_obj
         .get("actor_id")
@@ -1702,7 +1720,7 @@ fn parse_tool_call(
 }
 
 #[cfg(feature = "server")]
-fn parse_actor_id_param(params: Option<&Value>) -> Result<Option<ActorId>, PooledMemoryError> {
+fn parse_actor_id_param(params: Option<&Value>) -> Result<Option<ActorId>, MnemesError> {
     let Some(params) = params.and_then(Value::as_object) else {
         return Ok(None);
     };
@@ -1717,14 +1735,14 @@ fn parse_actor_id_param(params: Option<&Value>) -> Result<Option<ActorId>, Poole
 #[cfg(feature = "server")]
 fn parse_operation_source_types(
     raw: &[String],
-) -> Result<Vec<SearchSourceType>, PooledMemoryError> {
+) -> Result<Vec<SearchSourceType>, MnemesError> {
     raw.iter()
         .map(|value| match value.to_lowercase().as_str() {
             "facts" | "fact" => Ok(SearchSourceType::Facts),
             "chunks" | "chunk" => Ok(SearchSourceType::Chunks),
             "messages" | "message" => Ok(SearchSourceType::Messages),
             "episodes" | "episode" => Ok(SearchSourceType::Episodes),
-            _ => Err(PooledMemoryError::InvalidAsOf(format!(
+            _ => Err(MnemesError::InvalidAsOf(format!(
                 "unsupported source_type {value}"
             ))),
         })
@@ -1800,7 +1818,7 @@ fn result_from_operation_source(
 async fn run_witnessed_search(
     state: &ServerState,
     request: McpSearchRequest,
-) -> Result<WitnessedSearchResponse, PooledMemoryError> {
+) -> Result<WitnessedSearchResponse, MnemesError> {
     let namespaces = request
         .namespaces
         .as_ref()
@@ -1876,6 +1894,24 @@ async fn search_witnessed_handler(
 }
 
 #[cfg(feature = "server")]
+async fn sync_endpoint(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    Json(request): Json<crate::sync_handler::SyncRequest>,
+) -> Response {
+    let _ = match authorize(&state, &headers, None).await {
+        Ok(ctx) => ctx,
+        Err(error) => return error_response(&error),
+    };
+    let registry = crate::replication::TrustedKeyRegistry::new();
+    let base = state.store.base_dir().to_path_buf();
+    let dispatch = |_conn: &rusqlite::Connection, _kind: &str, _payload: &[u8]| Ok(());
+    match crate::sync_handler::process_sync_request(request, &registry, &base, &dispatch) {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => error_response(&error),
+    }
+}
+
 async fn build_health_payload(state: &ServerState) -> HealthResponse {
     let mut embedding = HashMap::new();
     embedding.insert(
@@ -1924,7 +1960,7 @@ async fn mcp_handler(
         "initialize" => {
             let tools = tools_for_actor(None);
             Some(serde_json::json!({
-                "name": "pooled-memory",
+                "name": "mnemes",
                 "version": SCHEMA_VERSION,
                 "tools": tools
             }))
@@ -1934,7 +1970,7 @@ async fn mcp_handler(
                 Ok(Some(actor_id)) => actor_id,
                 Ok(None) => {
                     return unauthorized_rpc(
-                        PooledMemoryError::InvalidAsOf("actor_id required".to_string()),
+                        MnemesError::InvalidAsOf("actor_id required".to_string()),
                         rpc_id,
                     );
                 }
@@ -1949,16 +1985,16 @@ async fn mcp_handler(
             }))
         }
         "tools/call" => {
-            let tool_result: Result<Value, PooledMemoryError> = (async {
+            let tool_result: Result<Value, MnemesError> = (async {
                 let (actor_id_raw, name, args) = parse_tool_call(request.params.as_ref())?;
                 let actor_id = actor_id_raw.ok_or_else(|| {
-                    PooledMemoryError::InvalidAsOf("actor_id required".to_string())
+                    MnemesError::InvalidAsOf("actor_id required".to_string())
                 })?;
                 let actor_id = parse_actor_id(&actor_id)?;
                 let context = authorize(&state, &headers, Some(actor_id)).await?;
 
                 if hidden_tool(&name) {
-                    return Err(PooledMemoryError::AuthorizationDenied(
+                    return Err(MnemesError::AuthorizationDenied(
                         "tool is not available".to_string(),
                     ));
                 }
@@ -1971,13 +2007,13 @@ async fn mcp_handler(
                         .as_ref()
                         .map_or(true, |value| value.tool_profile != ToolProfile::Operator)
                 {
-                    return Err(PooledMemoryError::AuthorizationDenied(
+                    return Err(MnemesError::AuthorizationDenied(
                         "operator profile required".to_string(),
                     ));
                 }
 
                 if !is_read_tool && !is_operator_tool {
-                    return Err(PooledMemoryError::InvalidAsOf(
+                    return Err(MnemesError::InvalidAsOf(
                         "unsupported tool".to_string(),
                     ));
                 }
@@ -1986,7 +2022,7 @@ async fn mcp_handler(
                     "sm_get_device" => {
                         let tool_request: McpDeviceRequest = serde_json::from_value(args.clone())
                             .map_err(|_| {
-                            PooledMemoryError::InvalidAsOf("invalid sm_get_device args".to_string())
+                            MnemesError::InvalidAsOf("invalid sm_get_device args".to_string())
                         })?;
                         let device_id = parse_device_id(&tool_request.device_id)?;
                         if device_id != context.device.device_id
@@ -1995,13 +2031,13 @@ async fn mcp_handler(
                                 .as_ref()
                                 .map_or(true, |actor| actor.tool_profile != ToolProfile::Operator)
                         {
-                            return Err(PooledMemoryError::AuthorizationDenied(
+                            return Err(MnemesError::AuthorizationDenied(
                                 "device mismatch".to_string(),
                             ));
                         }
                         let device =
                             state.store.get_device(&device_id).await?.ok_or_else(|| {
-                                PooledMemoryError::DeviceNotFound(tool_request.device_id.clone())
+                                MnemesError::DeviceNotFound(tool_request.device_id.clone())
                             })?;
                         serde_json::to_value(DeviceInfo {
                             device_id: device.device_id.to_string(),
@@ -2013,7 +2049,7 @@ async fn mcp_handler(
                             last_seen_at: device.last_seen_at,
                         })
                         .map_err(|error| {
-                            PooledMemoryError::InvalidAsOf(format!(
+                            MnemesError::InvalidAsOf(format!(
                                 "failed to serialize result: {error}"
                             ))
                         })?
@@ -2035,7 +2071,7 @@ async fn mcp_handler(
                                 .collect::<Vec<_>>(),
                         )
                         .map_err(|error| {
-                            PooledMemoryError::InvalidAsOf(format!(
+                            MnemesError::InvalidAsOf(format!(
                                 "failed to serialize result: {error}"
                             ))
                         })?
@@ -2043,16 +2079,16 @@ async fn mcp_handler(
                     "sm_get_actor" => {
                         let tool_request: McpActorRequest = serde_json::from_value(args.clone())
                             .map_err(|_| {
-                                PooledMemoryError::InvalidAsOf(
+                                MnemesError::InvalidAsOf(
                                     "invalid sm_get_actor args".to_string(),
                                 )
                             })?;
                         let actor_id = parse_actor_id(&tool_request.actor_id)?;
                         let actor = state.store.get_actor(&actor_id).await?.ok_or_else(|| {
-                            PooledMemoryError::ActorNotFound(tool_request.actor_id.clone())
+                            MnemesError::ActorNotFound(tool_request.actor_id.clone())
                         })?;
                         if actor.device_id != context.device.device_id {
-                            return Err(PooledMemoryError::AuthorizationDenied(
+                            return Err(MnemesError::AuthorizationDenied(
                                 "actor does not belong to device".to_string(),
                             ));
                         }
@@ -2065,7 +2101,7 @@ async fn mcp_handler(
                             recorded_at: actor.recorded_at,
                         })
                         .map_err(|error| {
-                            PooledMemoryError::InvalidAsOf(format!(
+                            MnemesError::InvalidAsOf(format!(
                                 "failed to serialize result: {error}"
                             ))
                         })?
@@ -2073,13 +2109,13 @@ async fn mcp_handler(
                     "sm_get_operation" => {
                         let tool_request: McpOperationRequest =
                             serde_json::from_value(args.clone()).map_err(|_| {
-                                PooledMemoryError::InvalidAsOf(
+                                MnemesError::InvalidAsOf(
                                     "invalid sm_get_operation args".to_string(),
                                 )
                             })?;
                         let operation_id =
                             parse_id(&tool_request.operation_id).ok_or_else(|| {
-                                PooledMemoryError::InvalidAsOf("invalid operation id".to_string())
+                                MnemesError::InvalidAsOf("invalid operation id".to_string())
                             })?;
                         let envelope =
                             state
@@ -2087,12 +2123,12 @@ async fn mcp_handler(
                                 .get_operation(&operation_id)
                                 .await?
                                 .ok_or_else(|| {
-                                    PooledMemoryError::InvalidAsOf(
+                                    MnemesError::InvalidAsOf(
                                         "operation not found".to_string(),
                                     )
                                 })?;
                         if envelope.requesting_device_id != context.device.device_id {
-                            return Err(PooledMemoryError::AuthorizationDenied(
+                            return Err(MnemesError::AuthorizationDenied(
                                 "operation does not belong to device".to_string(),
                             ));
                         }
@@ -2101,7 +2137,7 @@ async fn mcp_handler(
                             .as_ref()
                             .map_or(true, |value| value.actor_id != envelope.requesting_actor_id)
                         {
-                            return Err(PooledMemoryError::AuthorizationDenied(
+                            return Err(MnemesError::AuthorizationDenied(
                                 "actor mismatch".to_string(),
                             ));
                         }
@@ -2120,7 +2156,7 @@ async fn mcp_handler(
                             receipt_id: envelope.receipt_id,
                         })
                         .map_err(|error| {
-                            PooledMemoryError::InvalidAsOf(format!(
+                            MnemesError::InvalidAsOf(format!(
                                 "failed to serialize result: {error}"
                             ))
                         })?
@@ -2128,13 +2164,13 @@ async fn mcp_handler(
                     "sm_search_witnessed" => {
                         let tool_request: McpSearchRequest = serde_json::from_value(args.clone())
                             .map_err(|_| {
-                            PooledMemoryError::InvalidAsOf(
+                            MnemesError::InvalidAsOf(
                                 "invalid sm_search_witnessed args".to_string(),
                             )
                         })?;
                         serde_json::to_value(run_witnessed_search(&state, tool_request).await?)
                             .map_err(|error| {
-                                PooledMemoryError::InvalidAsOf(format!(
+                                MnemesError::InvalidAsOf(format!(
                                     "failed to serialize result: {error}"
                                 ))
                             })?
@@ -2149,20 +2185,20 @@ async fn mcp_handler(
                         serde_json::to_value(McpStatsResponse {
                             pooled,
                             semantic: serde_json::to_value(semantic).map_err(|error| {
-                                PooledMemoryError::InvalidAsOf(format!(
+                                MnemesError::InvalidAsOf(format!(
                                     "failed to serialize stats: {error}"
                                 ))
                             })?,
                         })
                         .map_err(|error| {
-                            PooledMemoryError::InvalidAsOf(format!(
+                            MnemesError::InvalidAsOf(format!(
                                 "failed to serialize result: {error}"
                             ))
                         })?
                     }
                     "sm_health" => serde_json::to_value(build_health_payload(&state).await)
                         .map_err(|error| {
-                            PooledMemoryError::InvalidAsOf(format!(
+                            MnemesError::InvalidAsOf(format!(
                                 "failed to serialize health payload: {error}"
                             ))
                         })?,
@@ -2176,13 +2212,13 @@ async fn mcp_handler(
                                     Value::Object(values.clone()),
                                 )
                                 .map_err(|_| {
-                                    PooledMemoryError::InvalidAsOf(
+                                    MnemesError::InvalidAsOf(
                                         "invalid sm_heartbeat args".to_string(),
                                     )
                                 })?;
                                 let device_id = parse_device_id(&tool_request.device_id)?;
                                 if device_id != context.device.device_id {
-                                    return Err(PooledMemoryError::AuthorizationDenied(
+                                    return Err(MnemesError::AuthorizationDenied(
                                         "device mismatch".to_string(),
                                     ));
                                 }
@@ -2196,7 +2232,7 @@ async fn mcp_handler(
                     "sm_register_device" => {
                         let tool_request: RegisterDeviceRequest = serde_json::from_value(args)
                             .map_err(|_| {
-                                PooledMemoryError::InvalidAsOf(
+                                MnemesError::InvalidAsOf(
                                     "invalid sm_register_device args".to_string(),
                                 )
                             })?;
@@ -2212,7 +2248,7 @@ async fn mcp_handler(
                             .await?;
                         let device =
                             state.store.get_device(&device_id).await?.ok_or_else(|| {
-                                PooledMemoryError::DeviceNotFound(device_id.to_string())
+                                MnemesError::DeviceNotFound(device_id.to_string())
                             })?;
                         serde_json::to_value(RegisterDeviceResponse {
                             device_id: device.device_id.to_string(),
@@ -2222,7 +2258,7 @@ async fn mcp_handler(
                             status: device.status.as_str().to_string(),
                         })
                         .map_err(|error| {
-                            PooledMemoryError::InvalidAsOf(format!(
+                            MnemesError::InvalidAsOf(format!(
                                 "failed to serialize result: {error}"
                             ))
                         })?
@@ -2230,7 +2266,7 @@ async fn mcp_handler(
                     "sm_revoke_device" => {
                         let tool_request: McpDeviceRequest = serde_json::from_value(args.clone())
                             .map_err(|_| {
-                            PooledMemoryError::InvalidAsOf(
+                            MnemesError::InvalidAsOf(
                                 "invalid sm_revoke_device args".to_string(),
                             )
                         })?;
@@ -2241,7 +2277,7 @@ async fn mcp_handler(
                     "sm_rotate_device_key" => {
                         let tool_request: McpDeviceRequest = serde_json::from_value(args.clone())
                             .map_err(|_| {
-                            PooledMemoryError::InvalidAsOf(
+                            MnemesError::InvalidAsOf(
                                 "invalid sm_rotate_device_key args".to_string(),
                             )
                         })?;
@@ -2252,7 +2288,7 @@ async fn mcp_handler(
                     "sm_register_actor" => {
                         let tool_request: McpRegisterActorRequest =
                             serde_json::from_value(args.clone()).map_err(|_| {
-                                PooledMemoryError::InvalidAsOf(
+                                MnemesError::InvalidAsOf(
                                     "invalid sm_register_actor args".to_string(),
                                 )
                             })?;
@@ -2275,7 +2311,7 @@ async fn mcp_handler(
                     "sm_submit_operation" => {
                         let tool_request: OperationSubmitRequest =
                             serde_json::from_value(args.clone()).map_err(|_| {
-                                PooledMemoryError::InvalidAsOf(
+                                MnemesError::InvalidAsOf(
                                     "invalid sm_submit_operation args".to_string(),
                                 )
                             })?;
@@ -2284,7 +2320,7 @@ async fn mcp_handler(
                         let requesting_actor_id =
                             parse_actor_id(&tool_request.requesting_actor_id)?;
                         if requesting_device_id != context.device.device_id {
-                            return Err(PooledMemoryError::AuthorizationDenied(
+                            return Err(MnemesError::AuthorizationDenied(
                                 "device mismatch".to_string(),
                             ));
                         }
@@ -2293,7 +2329,7 @@ async fn mcp_handler(
                             .as_ref()
                             .map_or(true, |value| value.actor_id != requesting_actor_id)
                         {
-                            return Err(PooledMemoryError::AuthorizationDenied(
+                            return Err(MnemesError::AuthorizationDenied(
                                 "actor mismatch".to_string(),
                             ));
                         }
@@ -2327,7 +2363,7 @@ async fn mcp_handler(
                             .get_operation_by_idempotency_key(&tool_request.idempotency_key)
                             .await?
                             .ok_or_else(|| {
-                                PooledMemoryError::InvalidAsOf("operation not found".to_string())
+                                MnemesError::InvalidAsOf("operation not found".to_string())
                             })?;
                         serde_json::to_value(OperationEnvelopeResponse {
                             operation_id: envelope.operation_id.to_string(),
@@ -2336,7 +2372,7 @@ async fn mcp_handler(
                             recorded_at: envelope.recorded_at,
                         })
                         .map_err(|error| {
-                            PooledMemoryError::InvalidAsOf(format!(
+                            MnemesError::InvalidAsOf(format!(
                                 "failed to serialize result: {error}"
                             ))
                         })?
@@ -2374,13 +2410,13 @@ async fn mcp_handler(
                             },
                         })
                         .map_err(|error| {
-                            PooledMemoryError::InvalidAsOf(format!(
+                            MnemesError::InvalidAsOf(format!(
                                 "failed to serialize result: {error}"
                             ))
                         })?
                     }
                     _ => {
-                        return Err(PooledMemoryError::InvalidAsOf(
+                        return Err(MnemesError::InvalidAsOf(
                             "unsupported tool".to_string(),
                         ))
                     }
@@ -2410,16 +2446,16 @@ async fn mcp_handler(
 }
 
 #[cfg(feature = "server")]
-pub fn build_memory_store(base_dir: &str) -> Result<PooledMemoryStore, PooledMemoryError> {
+pub fn build_memory_store(base_dir: &str) -> Result<MnemesStore, MnemesError> {
     let db_dir = PathBuf::from(base_dir);
     let memory_config = MemoryConfig {
         base_dir: db_dir.join("memory"),
         ..Default::default()
     };
-    PooledMemoryStore::open(db_dir, memory_config)
+    MnemesStore::open(db_dir, memory_config)
 }
 
 #[cfg(feature = "server")]
-pub fn build_default_store() -> Result<PooledMemoryStore, PooledMemoryError> {
-    build_memory_store("./data/pooled-memory")
+pub fn build_default_store() -> Result<MnemesStore, MnemesError> {
+    build_memory_store("./data/mnemes")
 }

@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
-use pooled_memory::{
+use mnemes::{
     Actor, ActorId, ActorKind, AsOf, Device, DeviceId, MemoryItemRef, OperationEnvelope,
-    OperationId, OperationKind, PooledMemoryStore, ProvenanceEdgeRequest, ProvenanceEdgeType,
+    OperationId, OperationKind, MnemesStore, ProvenanceEdgeRequest, ProvenanceEdgeType,
     ProvenanceQuery,
 };
 use semantic_memory::{EmbeddingConfig, MemoryConfig, MockEmbedder};
@@ -13,7 +13,7 @@ fn fixed_time(value: &str) -> DateTime<Utc> {
         .with_timezone(&Utc)
 }
 
-async fn open_store() -> (PooledMemoryStore, TempDir) {
+async fn open_store() -> (MnemesStore, TempDir) {
     let dir = TempDir::new().unwrap();
     let config = MemoryConfig {
         base_dir: dir.path().to_path_buf(),
@@ -24,7 +24,7 @@ async fn open_store() -> (PooledMemoryStore, TempDir) {
         ..Default::default()
     };
 
-    let store = PooledMemoryStore::open_with_embedder(
+    let store = MnemesStore::open_with_embedder(
         dir.path().to_path_buf(),
         config,
         Box::new(MockEmbedder::new(768)),
@@ -34,7 +34,7 @@ async fn open_store() -> (PooledMemoryStore, TempDir) {
     (store, dir)
 }
 
-async fn setup_subjects(store: &PooledMemoryStore) -> (DeviceId, ActorId) {
+async fn setup_subjects(store: &MnemesStore) -> (DeviceId, ActorId) {
     let device_id = DeviceId::new();
     store
         .register_device(Device::new(
@@ -60,7 +60,7 @@ async fn setup_subjects(store: &PooledMemoryStore) -> (DeviceId, ActorId) {
 }
 
 async fn submit_operation(
-    store: &PooledMemoryStore,
+    store: &MnemesStore,
     device_id: DeviceId,
     actor_id: ActorId,
     operation_kind: OperationKind,
@@ -146,7 +146,7 @@ async fn schema_and_edge_storage_persist_across_reopen() {
 
     drop(store);
 
-    let reopened = PooledMemoryStore::open_with_embedder(
+    let reopened = MnemesStore::open_with_embedder(
         dir.path().to_path_buf(),
         MemoryConfig {
             base_dir: dir.path().to_path_buf(),

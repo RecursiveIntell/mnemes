@@ -1,9 +1,9 @@
 #!/usr/bin/env python3
-"""Line-delimited stdio JSON-RPC bridge to pooled-memory HTTP MCP."""
+"""Line-delimited stdio JSON-RPC bridge to mnemes HTTP MCP."""
 import importlib.util, json, sys
 from pathlib import Path
-_module_path = Path(__file__).resolve().with_name("pooled-memory-client.py")
-_spec = importlib.util.spec_from_file_location("pooled_memory_client", _module_path)
+_module_path = Path(__file__).resolve().with_name("mnemes-client.py")
+_spec = importlib.util.spec_from_file_location("mnemes_client", _module_path)
 _module = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_module)
 PooledClient, ClientError = _module.PooledClient, _module.ClientError
@@ -23,7 +23,7 @@ def main():
                     "result": {
                         "protocolVersion": params.get("protocolVersion", "2024-11-05"),
                         "capabilities": {"tools": {"listChanged": False}},
-                        "serverInfo": {"name": "pooled-memory", "version": "0.1.0"},
+                        "serverInfo": {"name": "mnemes", "version": "0.1.0"},
                     },
                 })
                 continue

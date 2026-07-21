@@ -1,4 +1,4 @@
-use pooled_memory::{ActorKind, Device, DeviceId, PooledMemoryStore};
+use mnemes::{ActorKind, Device, DeviceId, MnemesStore};
 use semantic_memory::MemoryConfig;
 use serde_json::json;
 use std::env;
@@ -8,7 +8,7 @@ use std::path::PathBuf;
 async fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.first().map(String::as_str) != Some("bootstrap") || args.len() < 5 || args.len() > 6 {
-        eprintln!("usage: pooled-memory-admin bootstrap <DATA_DIR> <LABEL> <PLATFORM> <HOSTNAME> [ACTOR_KIND]");
+        eprintln!("usage: mnemes-admin bootstrap <DATA_DIR> <LABEL> <PLATFORM> <HOSTNAME> [ACTOR_KIND]");
         std::process::exit(1);
     }
 
@@ -29,7 +29,7 @@ async fn main() {
         None => ActorKind::Human,
     };
 
-    let store = match PooledMemoryStore::open(
+    let store = match MnemesStore::open(
         data_dir,
         MemoryConfig {
             ..Default::default()

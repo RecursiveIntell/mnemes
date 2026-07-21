@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Strict stdlib client for pooled-memory HTTP/MCP."""
+"""Strict stdlib client for mnemes HTTP/MCP."""
 import argparse, json, os, sys, time, urllib.error, urllib.request
 from pathlib import Path
 
@@ -22,16 +22,16 @@ def load_env_file(path):
 class PooledClient:
     def __init__(self, env=None):
         source=dict(os.environ if env is None else env)
-        path=source.get("POOLED_MEMORY_ENV_FILE", str(Path.home()/".config/pooled-memory/client.env"))
+        path=source.get("MNEMES_ENV_FILE", str(Path.home()/".config/mnemes/client.env"))
         file_values=load_env_file(path)
         for k,v in file_values.items(): source.setdefault(k,v)
-        self.url=source.get("POOLED_MEMORY_URL", "").rstrip("/")
-        self.credential=source.get("POOLED_MEMORY_CREDENTIAL", "")
-        self.actor_id=source.get("POOLED_MEMORY_ACTOR_ID", "")
-        self.device_id=source.get("POOLED_MEMORY_DEVICE_ID", "")
-        self.timeout=float(source.get("POOLED_MEMORY_TIMEOUT", "15"))
+        self.url=source.get("MNEMES_URL", "").rstrip("/")
+        self.credential=source.get("MNEMES_CREDENTIAL", "")
+        self.actor_id=source.get("MNEMES_ACTOR_ID", "")
+        self.device_id=source.get("MNEMES_DEVICE_ID", "")
+        self.timeout=float(source.get("MNEMES_TIMEOUT", "15"))
         if not all((self.url,self.credential,self.actor_id,self.device_id)):
-            raise ClientError("missing pooled-memory URL/credential/actor/device configuration")
+            raise ClientError("missing mnemes URL/credential/actor/device configuration")
 
     def request(self, path, method="GET", body=None, retries=0):
         payload=None if body is None else json.dumps(body,separators=(",",":")).encode()

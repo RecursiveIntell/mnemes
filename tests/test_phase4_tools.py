@@ -2,10 +2,10 @@ import http.server, importlib.util, json, os, stat, subprocess, tempfile, thread
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
-CLIENT=ROOT/'scripts/pooled-memory-client.py'
-PROXY=ROOT/'scripts/pooled-memory-mcp-proxy.py'
+CLIENT=ROOT/'scripts/mnemes-client.py'
+PROXY=ROOT/'scripts/mnemes-mcp-proxy.py'
 WRAPPER=ROOT/'scripts/pooled-codex-task.sh'
-INSTALL=ROOT/'scripts/install-pooled-memory-service.sh'
+INSTALL=ROOT/'scripts/install-mnemes-service.sh'
 
 class Handler(http.server.BaseHTTPRequestHandler):
     malformed=False
@@ -30,8 +30,8 @@ class Phase4Tools(unittest.TestCase):
     @classmethod
     def tearDownClass(cls): cls.server.shutdown()
     def env(self,d):
-        p=Path(d)/'client.env'; p.write_text(f'POOLED_MEMORY_URL=http://127.0.0.1:{self.server.server_port}\nPOOLED_MEMORY_CREDENTIAL=device:secret\nPOOLED_MEMORY_ACTOR_ID=actor-1\nPOOLED_MEMORY_DEVICE_ID=device-1\n'); p.chmod(0o600)
-        e=os.environ.copy(); e['POOLED_MEMORY_ENV_FILE']=str(p); return e
+        p=Path(d)/'client.env'; p.write_text(f'MNEMES_URL=http://127.0.0.1:{self.server.server_port}\nMNEMES_CREDENTIAL=device:secret\nMNEMES_ACTOR_ID=actor-1\nMNEMES_DEVICE_ID=device-1\n'); p.chmod(0o600)
+        e=os.environ.copy(); e['MNEMES_ENV_FILE']=str(p); return e
     def test_health_and_no_secret_leak(self):
         with tempfile.TemporaryDirectory() as d:
             r=subprocess.run([str(CLIENT),'health'],env=self.env(d),text=True,capture_output=True)
@@ -50,7 +50,7 @@ class Phase4Tools(unittest.TestCase):
             result=json.loads(r.stdout)['result']
             self.assertEqual(result['protocolVersion'],'2024-11-05')
             self.assertIn('tools',result['capabilities'])
-            self.assertEqual(result['serverInfo']['name'],'pooled-memory')
+            self.assertEqual(result['serverInfo']['name'],'mnemes')
 
     def test_proxy_injects_actor(self):
         with tempfile.TemporaryDirectory() as d:
@@ -62,13 +62,13 @@ class Phase4Tools(unittest.TestCase):
         with tempfile.TemporaryDirectory() as d:
             e=os.environ.copy(); e['HOME']=d
             r=subprocess.run([str(INSTALL)],env=e,text=True,capture_output=True)
-            self.assertEqual(r.returncode,0); self.assertFalse((Path(d)/'.config/pooled-memory').exists())
+            self.assertEqual(r.returncode,0); self.assertFalse((Path(d)/'.config/mnemes').exists())
     def test_codex_exit_code_preserved(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d); bindir=root/'bin'; bindir.mkdir(); receipts=root/'receipts'
             codex=bindir/'codex'; codex.write_text('#!/bin/sh\necho fake-codex\nexit 7\n'); codex.chmod(0o755)
             client=bindir/'client'; client.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$CLIENT_ARGS_LOG"\ncase "$1" in witnessed-search) echo "{\\"receipt\\":{}}";; submit-operation) echo "{\\"receipt_id\\":\\"r1\\"}";; esac\n'); client.chmod(0o755)
-            args_log=root/'client-args.log'; e=os.environ.copy(); e.update({'PATH':str(bindir)+':'+e['PATH'],'POOLED_MEMORY_CLIENT':str(client),'POOLED_MEMORY_RECEIPT_DIR':str(receipts),'CLIENT_ARGS_LOG':str(args_log),'HOME':d})
+            args_log=root/'client-args.log'; e=os.environ.copy(); e.update({'PATH':str(bindir)+':'+e['PATH'],'MNEMES_CLIENT':str(client),'MNEMES_RECEIPT_DIR':str(receipts),'CLIENT_ARGS_LOG':str(args_log),'HOME':d})
             r=subprocess.run([str(WRAPPER),'--','prompt'],env=e,text=True,capture_output=True)
             self.assertEqual(r.returncode,7); self.assertTrue(list(receipts.glob('*.receipt.json'))); self.assertIn('--operation-kind observe',args_log.read_text())
 

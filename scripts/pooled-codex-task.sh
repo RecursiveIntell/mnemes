@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 set -uo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-client=${POOLED_MEMORY_CLIENT:-$script_dir/pooled-memory-client.py}
-receipt_dir=${POOLED_MEMORY_RECEIPT_DIR:-$HOME/.local/state/pooled-memory/codex-receipts}
-strict=${POOLED_MEMORY_STRICT:-1}
+client=${MNEMES_CLIENT:-$script_dir/mnemes-client.py}
+receipt_dir=${MNEMES_RECEIPT_DIR:-$HOME/.local/state/mnemes/codex-receipts}
+strict=${MNEMES_STRICT:-1}
 dry=0
 [[ ${1:-} == --dry-run ]] && { dry=1; shift; }
 [[ ${1:-} == -- ]] && shift
@@ -11,7 +11,7 @@ if (( dry )); then printf '{"dry_run":true,"would_run":"codex exec","argument_co
 mkdir -p "$receipt_dir"; chmod 700 "$receipt_dir"
 task_id=$(python3 -c 'import uuid; print(uuid.uuid4())')
 base="$receipt_dir/$task_id"; context="$base.context.json"; transcript="$base.transcript.txt"; receipt="$base.receipt.json"
-query=${POOLED_MEMORY_CONTEXT_QUERY:-${*:-coding task}}
+query=${MNEMES_CONTEXT_QUERY:-${*:-coding task}}
 if ! "$client" witnessed-search "$query" >"$context"; then
   [[ $strict == 1 ]] && exit 70
   printf '{"degraded":"pooled context unavailable"}\n' >"$context"

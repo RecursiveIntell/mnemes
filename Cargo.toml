@@ -1,20 +1,24 @@
 [package]
-name = "pooled-memory"
+name = "mnemes"
 version = "0.1.0"
 edition = "2021"
 rust-version = "1.75"
-description = "Multi-device pooled memory server with device/actor provenance, bitemporal lineage, and idempotent operation envelopes"
+description = "Multi-device memory control plane — device/actor provenance, bitemporal lineage, semantic shard routing, idempotent operation envelopes, and replication for local-first AI agents"
 license = "Apache-2.0"
-repository = "https://github.com/RecursiveIntell/pooled-memory"
+authors = ["Josh Stevenson <j.stevenson.cs@gmail.com>"]
+readme = "README.md"
+repository = "https://github.com/RecursiveIntell/mnemes"
+homepage = "https://github.com/RecursiveIntell/mnemes"
+documentation = "https://docs.rs/mnemes"
 keywords = ["memory", "multi-device", "provenance", "agent", "semantic"]
-categories = ["database", "text-processing"]
+categories = ["database", "text-processing", "development-tools"]
 
 [features]
 default = ["server"]
 server = ["dep:axum", "dep:tower", "dep:tower-http"]
 
 [dependencies]
-semantic-memory = { path = "../Libraries/semantic-memory" }
+semantic-memory = "0.5"
 rusqlite = { version = "0.32", features = ["bundled", "blob"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "net"] }
 serde = { version = "1", features = ["derive"] }
@@ -22,15 +26,29 @@ serde_json = "1"
 rand = "0.8"
 uuid = { version = "1", features = ["v4"] }
 sha2 = "0.10"
+base64 = "0.22"
+hmac = "0.12"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
 chrono = { version = "0.4", features = ["serde"] }
 thiserror = "1"
 schemars = "0.8"
+futures = "0.3"
 
 # Optional server deps
 axum = { version = "0.7", optional = true }
 tower = { version = "0.5", optional = true, features = ["limit", "timeout"] }
 tower-http = { version = "0.6", optional = true, features = ["cors", "limit", "timeout"] }
+hex = "0.4.3"
+subtle = "2.6.1"
 
 [dev-dependencies]
 tempfile = "3"
 reqwest = { version = "0.12", features = ["json"] }
+
+[[bin]]
+name = "mnemes-server"
+path = "src/bin/mnemes-server.rs"
+
+[[bin]]
+name = "mnemes-admin"
+path = "src/bin/mnemes-admin.rs"

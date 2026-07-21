@@ -1,5 +1,5 @@
-use pooled_memory::server::{build_memory_store, build_router};
-use pooled_memory::PooledMemoryStore;
+use mnemes::server::{build_memory_store, build_router};
+use mnemes::MnemesStore;
 use reqwest::{Client, StatusCode};
 use serde_json::{json, Value};
 use std::path::PathBuf;
@@ -21,10 +21,10 @@ struct RunningServer {
     _handle: JoinHandle<()>,
 }
 
-async fn open_store() -> (TempDir, PooledMemoryStore) {
+async fn open_store() -> (TempDir, MnemesStore) {
     let temp = TempDir::new().unwrap();
     let base = PathBuf::from(temp.path());
-    let store = PooledMemoryStore::open_with_embedder(
+    let store = MnemesStore::open_with_embedder(
         base.join("pooled-store"),
         semantic_memory::MemoryConfig {
             base_dir: base.clone(),
@@ -59,7 +59,7 @@ async fn spawn_server() -> RunningServer {
 }
 
 #[cfg(feature = "server")]
-async fn spawn_server_with_store(_temp: TempDir, store: PooledMemoryStore) -> RunningServer {
+async fn spawn_server_with_store(_temp: TempDir, store: MnemesStore) -> RunningServer {
     let app = build_router(store);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
@@ -156,7 +156,7 @@ async fn mcp_call(
 }
 
 #[cfg(feature = "server")]
-async fn seed_witnessed_fact(store: &PooledMemoryStore, namespace: &str, content: &str) {
+async fn seed_witnessed_fact(store: &MnemesStore, namespace: &str, content: &str) {
     store
         .memory()
         .add_fact(namespace, content, None, None)

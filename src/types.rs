@@ -10,7 +10,7 @@ use std::fmt;
 use std::str::FromStr;
 use uuid::{Uuid, Variant, Version};
 
-use crate::error::PooledMemoryError;
+use crate::error::MnemesError;
 use semantic_memory::MemoryError;
 
 macro_rules! opaque_uuid_v4 {
@@ -128,16 +128,16 @@ pub struct MemoryItemRef {
 
 impl MemoryItemRef {
     /// Construct and validate a typed item reference.
-    pub fn new(kind: impl Into<String>, id: impl Into<String>) -> Result<Self, PooledMemoryError> {
+    pub fn new(kind: impl Into<String>, id: impl Into<String>) -> Result<Self, MnemesError> {
         let kind = kind.into();
         let id = id.into();
         if kind.trim().is_empty() {
-            return Err(PooledMemoryError::InvalidProvenance(
+            return Err(MnemesError::InvalidProvenance(
                 "memory item kind cannot be empty".to_string(),
             ));
         }
         if id.trim().is_empty() {
-            return Err(PooledMemoryError::InvalidProvenance(
+            return Err(MnemesError::InvalidProvenance(
                 "memory item id cannot be empty".to_string(),
             ));
         }
@@ -145,13 +145,13 @@ impl MemoryItemRef {
     }
 
     /// Parse from canonical `kind:id`.
-    pub fn parse_key(value: impl AsRef<str>) -> Result<Self, PooledMemoryError> {
+    pub fn parse_key(value: impl AsRef<str>) -> Result<Self, MnemesError> {
         let value = value.as_ref();
         let mut parts = value.splitn(2, ':');
         let kind = parts.next().unwrap_or_default();
         let id = parts.next().unwrap_or_default();
         if kind.is_empty() || id.is_empty() || parts.next().is_some() {
-            return Err(PooledMemoryError::InvalidProvenance(format!(
+            return Err(MnemesError::InvalidProvenance(format!(
                 "invalid memory item key '{value}'"
             )));
         }

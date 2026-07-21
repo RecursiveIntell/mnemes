@@ -1,0 +1,110 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1100 600" font-family="'SF Pro Display', 'Inter', 'Segoe UI', sans-serif">
+  <defs>
+    <linearGradient id="bg3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#0a0e1a"/>
+      <stop offset="100%" stop-color="#0f1629"/>
+    </linearGradient>
+    <linearGradient id="httpGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#1a2f3a"/>
+      <stop offset="100%" stop-color="#0d1b2a"/>
+    </linearGradient>
+    <linearGradient id="mcpGrad" x1="0%" y1="0%" x2="0%" y2="100%">
+      <stop offset="0%" stop-color="#2a1f3a"/>
+      <stop offset="100%" stop-color="#1a0f2a"/>
+    </linearGradient>
+    <filter id="glow3" x="-15%" y="-15%" width="130%" height="130%">
+      <feGaussianBlur stdDeviation="2" result="coloredBlur"/>
+      <feMerge><feMergeNode in="coloredBlur"/><feMergeNode in="SourceGraphic"/></feMerge>
+    </filter>
+  </defs>
+
+  <rect width="1100" height="600" fill="url(#bg3)" rx="12"/>
+
+  <!-- Title -->
+  <text x="550" y="35" text-anchor="middle" font-size="18" font-weight="700" fill="#e8e8e8" letter-spacing="1">API SURFACE — HTTP &amp; MCP</text>
+  <text x="550" y="55" text-anchor="middle" font-size="11" fill="#6c5ce7" letter-spacing="2">Loopback-only · fail-closed auth · tool-profile gated</text>
+
+  <!-- ====== HTTP REST Panel ====== -->
+  <rect x="40" y="75" width="500" height="500" rx="12" fill="url(#httpGrad)" stroke="#00b894" stroke-width="1.5" filter="url(#glow3)"/>
+  <text x="290" y="100" text-anchor="middle" font-size="14" font-weight="700" fill="#00b894">HTTP REST API (axum)</text>
+  <text x="290" y="118" text-anchor="middle" font-size="9" fill="#55efc4">Bearer token auth · 127.0.0.1 only</text>
+
+  <!-- Device Management -->
+  <rect x="60" y="135" width="460" height="120" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="80" y="155" font-size="11" font-weight="600" fill="#74b9ff">Device Management</text>
+  <text x="80" y="175" font-size="9" fill="#c9d1d9" font-family="monospace">POST   /v1/devices/register</text>
+  <text x="80" y="192" font-size="9" fill="#c9d1d9" font-family="monospace">GET    /v1/devices</text>
+  <text x="80" y="209" font-size="9" fill="#c9d1d9" font-family="monospace">POST   /v1/devices/:id/heartbeat</text>
+  <text x="80" y="226" font-size="9" fill="#c9d1d9" font-family="monospace">POST   /v1/devices/:id/rotate</text>
+  <text x="290" y="175" font-size="9" fill="#c9d1d9" font-family="monospace">POST   /v1/devices/:id/revoke</text>
+  <text x="290" y="192" font-size="9" fill="#c9d1d9" font-family="monospace">POST   /v1/devices/:id/quarantine</text>
+
+  <!-- Actor Management -->
+  <rect x="60" y="265" width="460" height="80" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="80" y="285" font-size="11" font-weight="600" fill="#a29bfe">Actor Management</text>
+  <text x="80" y="305" font-size="9" fill="#c9d1d9" font-family="monospace">POST   /v1/actors</text>
+  <text x="80" y="322" font-size="9" fill="#c9d1d9" font-family="monospace">GET    /v1/actors?device_id=</text>
+
+  <!-- Operations -->
+  <rect x="60" y="355" width="460" height="100" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="80" y="375" font-size="11" font-weight="600" fill="#fdcb6e">Operations</text>
+  <text x="80" y="395" font-size="9" fill="#c9d1d9" font-family="monospace">POST   /v1/operations</text>
+  <text x="80" y="412" font-size="9" fill="#c9d1d9" font-family="monospace">GET    /v1/operations?device_id=&actor_id=</text>
+  <text x="80" y="429" font-size="9" fill="#c9d1d9" font-family="monospace">GET    /v1/operations/:id</text>
+
+  <!-- Search & Evidence -->
+  <rect x="60" y="465" width="460" height="95" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="80" y="485" font-size="11" font-weight="600" fill="#e17055">Search, Evidence &amp; Health</text>
+  <text x="80" y="505" font-size="9" fill="#c9d1d9" font-family="monospace">POST   /v1/search/witnessed</text>
+  <text x="80" y="522" font-size="9" fill="#c9d1d9" font-family="monospace">GET    /v1/receipts/:id</text>
+  <text x="290" y="505" font-size="9" fill="#c9d1d9" font-family="monospace">GET    /v1/integrity</text>
+  <text x="290" y="522" font-size="9" fill="#c9d1d9" font-family="monospace">GET    /v1/audit/events</text>
+  <text x="80" y="545" font-size="9" fill="#c9d1d9" font-family="monospace">GET    /livez   /healthz</text>
+
+  <!-- ====== MCP Panel ====== -->
+  <rect x="560" y="75" width="500" height="500" rx="12" fill="url(#mcpGrad)" stroke="#a29bfe" stroke-width="1.5" filter="url(#glow3)"/>
+  <text x="810" y="100" text-anchor="middle" font-size="14" font-weight="700" fill="#a29bfe">MCP Tool Surface</text>
+  <text x="810" y="118" text-anchor="middle" font-size="9" fill="#9d8cd5">JSON-RPC over stdio · /mcp endpoint</text>
+
+  <!-- Agent Profile -->
+  <rect x="580" y="135" width="220" height="240" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="690" y="155" text-anchor="middle" font-size="11" font-weight="600" fill="#00b894">Agent Profile (read-only)</text>
+  <text x="600" y="178" font-size="9" fill="#c9d1d9">sm_search_witnessed</text>
+  <text x="600" y="196" font-size="9" fill="#c9d1d9">sm_get_fact</text>
+  <text x="600" y="214" font-size="9" fill="#c9d1d9">sm_get_fact_neighbors</text>
+  <text x="600" y="232" font-size="9" fill="#c9d1d9">sm_graph_path</text>
+  <text x="600" y="250" font-size="9" fill="#c9d1d9">sm_list_namespaces</text>
+  <text x="600" y="268" font-size="9" fill="#c9d1d9">sm_decide_assertion_authority</text>
+  <text x="600" y="286" font-size="9" fill="#c9d1d9">sm_decide_action_authority</text>
+  <text x="600" y="304" font-size="9" fill="#c9d1d9">sm_get_search_receipt</text>
+  <text x="600" y="322" font-size="9" fill="#c9d1d9">sm_replay_search</text>
+  <text x="600" y="340" font-size="9" fill="#c9d1d9">sm_search_conversations</text>
+  <text x="600" y="358" font-size="9" fill="#8e9bb5" font-style="italic">+ device/actor lookups</text>
+
+  <!-- Operator Profile -->
+  <rect x="820" y="135" width="220" height="240" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="930" y="155" text-anchor="middle" font-size="11" font-weight="600" fill="#fdcb6e">Operator Profile</text>
+  <text x="840" y="178" font-size="9" fill="#c9d1d9" font-weight="600">All Agent tools, plus:</text>
+  <text x="840" y="200" font-size="9" fill="#c9d1d9">sm_register_device</text>
+  <text x="840" y="218" font-size="9" fill="#c9d1d9">sm_register_actor</text>
+  <text x="840" y="236" font-size="9" fill="#c9d1d9">sm_submit_operation</text>
+  <text x="840" y="254" font-size="9" fill="#c9d1d9">sm_heartbeat</text>
+  <text x="840" y="272" font-size="9" fill="#c9d1d9">sm_rotate_device_key</text>
+  <text x="840" y="290" font-size="9" fill="#c9d1d9">sm_revoke_device</text>
+  <text x="840" y="308" font-size="9" fill="#c9d1d9">sm_list_devices</text>
+  <text x="840" y="326" font-size="9" fill="#c9d1d9">sm_list_actors</text>
+  <text x="840" y="344" font-size="9" fill="#c9d1d9">sm_list_operations</text>
+  <text x="840" y="362" font-size="9" fill="#c9d1d9">sm_get_operation</text>
+
+  <!-- Sync -->
+  <rect x="580" y="390" width="460" height="75" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="600" y="412" font-size="11" font-weight="600" fill="#e17055">Replication &amp; Sync</text>
+  <text x="600" y="432" font-size="9" fill="#c9d1d9" font-family="monospace">POST /v1/sync</text>
+  <text x="600" y="450" font-size="9" fill="#8e9bb5">Signed mutation envelopes (Ed25519) · snapshot bootstrap + journal replay</text>
+
+  <!-- Admin CLI -->
+  <rect x="580" y="475" width="460" height="85" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
+  <text x="600" y="497" font-size="11" font-weight="600" fill="#74b9ff">Admin CLI — mnemes-admin</text>
+  <text x="600" y="517" font-size="9" fill="#c9d1d9" font-family="monospace">mnemes-admin bootstrap &lt;DATA_DIR&gt; &lt;LABEL&gt; &lt;PLATFORM&gt; &lt;HOSTNAME&gt;</text>
+  <text x="600" y="540" font-size="9" fill="#8e9bb5">Offline device registration · single-use credential output</text>
+</svg>
