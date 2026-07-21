@@ -37,11 +37,7 @@ impl ReplicaStore {
     /// version 18+ for journal support, earlier versions for read-only search).
     ///
     /// Returns an error if the database cannot be opened or is corrupt.
-    pub fn open(
-        db_path: &Path,
-        device_id: &str,
-        store_id: &str,
-    ) -> Result<Self, MnemesError> {
+    pub fn open(db_path: &Path, device_id: &str, store_id: &str) -> Result<Self, MnemesError> {
         // Force read-only at the SQLite level via URI parameter
         let path_str = db_path.to_string_lossy();
         let uri = format!("file:{}?mode=ro", path_str);
@@ -137,9 +133,8 @@ impl ReplicaApplier {
         payload: &[u8],
         replay_fn: &dyn Fn(&Connection) -> Result<(), MnemesError>,
     ) -> Result<ApplyOutcome, MnemesError> {
-        let conn = Connection::open(&*self.db_path).map_err(|e| {
-            MnemesError::Replication(format!("cannot open replica for apply: {e}"))
-        })?;
+        let conn = Connection::open(&*self.db_path)
+            .map_err(|e| MnemesError::Replication(format!("cannot open replica for apply: {e}")))?;
 
         // Check if already applied
         let stored_payload: Option<Vec<u8>> = match conn.query_row(

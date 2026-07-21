@@ -1,6 +1,6 @@
 use mnemes::{
-    merge_routed_results, rank_shards, Device, DeviceId, DeviceShard, DeviceStatus,
-    MnemesError, MnemesStore, RoutedSearchResult, RoutingSearchRequest, ShardState,
+    merge_routed_results, rank_shards, Device, DeviceId, DeviceShard, DeviceStatus, MnemesError,
+    MnemesStore, RoutedSearchResult, RoutingSearchRequest, ShardState,
 };
 use semantic_memory::{MockEmbedder, SearchResult, SearchSource};
 use sha2::{Digest, Sha256};
@@ -390,10 +390,7 @@ fn conflicting_content_for_the_same_canonical_item_id_fails_closed() {
         10,
     )
     .unwrap_err();
-    assert!(matches!(
-        error,
-        MnemesError::ConflictingShardItem { .. }
-    ));
+    assert!(matches!(error, MnemesError::ConflictingShardItem { .. }));
 }
 
 #[test]
@@ -423,10 +420,7 @@ fn conflicting_content_after_top_k_still_fails_closed() {
         1,
     )
     .unwrap_err();
-    assert!(matches!(
-        error,
-        MnemesError::ConflictingShardItem { .. }
-    ));
+    assert!(matches!(error, MnemesError::ConflictingShardItem { .. }));
 }
 
 #[tokio::test]

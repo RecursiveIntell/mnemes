@@ -1,7 +1,7 @@
 use chrono::{DateTime, Utc};
 use mnemes::{
-    Actor, ActorId, ActorKind, AsOf, Device, DeviceId, MemoryItemRef, OperationEnvelope,
-    OperationId, OperationKind, MnemesStore, ProvenanceEdgeRequest, ProvenanceEdgeType,
+    Actor, ActorId, ActorKind, AsOf, Device, DeviceId, MemoryItemRef, MnemesStore,
+    OperationEnvelope, OperationId, OperationKind, ProvenanceEdgeRequest, ProvenanceEdgeType,
     ProvenanceQuery,
 };
 use semantic_memory::{EmbeddingConfig, GraphDirection, MemoryConfig, MockEmbedder};

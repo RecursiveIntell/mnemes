@@ -8,7 +8,9 @@ use std::path::PathBuf;
 async fn main() {
     let args: Vec<String> = env::args().skip(1).collect();
     if args.first().map(String::as_str) != Some("bootstrap") || args.len() < 5 || args.len() > 6 {
-        eprintln!("usage: mnemes-admin bootstrap <DATA_DIR> <LABEL> <PLATFORM> <HOSTNAME> [ACTOR_KIND]");
+        eprintln!(
+            "usage: mnemes-admin bootstrap <DATA_DIR> <LABEL> <PLATFORM> <HOSTNAME> [ACTOR_KIND]"
+        );
         std::process::exit(1);
     }
 
