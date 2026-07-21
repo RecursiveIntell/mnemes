@@ -73,7 +73,7 @@ def main(argv=None):
     if a.command=="health": _,v=c.request("/v1/health",retries=2); output(v)
     elif a.command=="tools-list": output(c.mcp("tools/list"))
     elif a.command=="tool-call": output(c.mcp("tools/call",{"name":a.name,"arguments":json.loads(a.arguments)}))
-    elif a.command=="witnessed-search": output(c.mcp("tools/call",{"name":"sm_search_witnessed","arguments":{"query":a.query,"top_k":a.top_k,"source_types":[x for x in a.source_types.split(",") if x]}}))
+    elif a.command=="witnessed-search": output(c.mcp("tools/call",{"name":"sm_search_witnessed","arguments":{"query":a.query,"limit":a.top_k,"source_types":[x for x in a.source_types.split(",") if x]}}))
     else:
         args={"idempotency_key":a.idempotency_key,"requesting_device_id":c.device_id,"requesting_actor_id":c.actor_id,"operation_kind":a.operation_kind,"target_kind":a.target_kind,"target_id":a.target_id,"content_digest":a.content_digest,"recording_device_id":c.device_id,"recording_server_id":c.device_id}
         output(c.mcp("tools/call",{"name":"sm_submit_operation","arguments":args}))

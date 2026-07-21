@@ -32,10 +32,7 @@ const RECEIPT_AUTH_KEY_FILE: &str = ".routing-receipt-hmac.key";
 /// any implementation through `open_with_embedder`) without changing the
 /// store or index contracts.
 fn configured_provider_name(value: Option<&str>) -> String {
-    value
-        .unwrap_or("candle")
-        .trim()
-        .to_ascii_lowercase()
+    value.unwrap_or("candle").trim().to_ascii_lowercase()
 }
 
 fn configured_embedder(
@@ -284,9 +281,7 @@ fn read_receipt_auth_key(path: &std::path::Path) -> Result<[u8; 32], MnemesError
     Ok(key)
 }
 
-fn load_or_create_receipt_auth_key(
-    base_dir: &std::path::Path,
-) -> Result<[u8; 32], MnemesError> {
+fn load_or_create_receipt_auth_key(base_dir: &std::path::Path) -> Result<[u8; 32], MnemesError> {
     let path = base_dir.join(RECEIPT_AUTH_KEY_FILE);
     if path.exists() {
         return read_receipt_auth_key(&path);
@@ -818,10 +813,7 @@ impl MnemesStore {
         Ok((device_id, secret.to_string()))
     }
 
-    async fn token_device_id(
-        &self,
-        token: &str,
-    ) -> Result<(Device, Option<String>), MnemesError> {
+    async fn token_device_id(&self, token: &str) -> Result<(Device, Option<String>), MnemesError> {
         let (device_id, secret) = Self::parse_authorization_token(token)?;
         let mut row = {
             let conn = self.pool_conn.lock().await;
@@ -956,9 +948,9 @@ impl MnemesStore {
         requires_full: bool,
     ) -> Result<(), MnemesError> {
         if requires_full {
-            let actor = actor.as_ref().ok_or_else(|| {
-                MnemesError::AuthorizationDenied("actor required".to_string())
-            })?;
+            let actor = actor
+                .as_ref()
+                .ok_or_else(|| MnemesError::AuthorizationDenied("actor required".to_string()))?;
             if !actor.tool_profile.is_full() {
                 return Err(MnemesError::AuthorizationDenied(
                     "actor lacks operator profile".to_string(),
@@ -1061,10 +1053,7 @@ impl MnemesStore {
         Ok(credentials.token)
     }
 
-    pub async fn get_device(
-        &self,
-        device_id: &DeviceId,
-    ) -> Result<Option<Device>, MnemesError> {
+    pub async fn get_device(&self, device_id: &DeviceId) -> Result<Option<Device>, MnemesError> {
         let conn = self.pool_conn.lock().await;
         let result = conn
             .query_row(
@@ -1128,10 +1117,7 @@ impl MnemesStore {
         Ok(())
     }
 
-    pub async fn list_devices_for_actor(
-        &self,
-        actor: &Actor,
-    ) -> Result<Vec<Device>, MnemesError> {
+    pub async fn list_devices_for_actor(&self, actor: &Actor) -> Result<Vec<Device>, MnemesError> {
         self.list_devices_for_device(&actor.device_id).await
     }
 
@@ -1436,6 +1422,11 @@ impl MnemesStore {
         &self.base_dir
     }
 
+    /// Embedding configuration used for newly opened shard stores.
+    pub fn memory_config(&self) -> &semantic_memory::MemoryConfig {
+        &self.memory_config
+    }
+
     /// Legacy synchronous accessor for handlers that predate the shard architecture.
     /// Lazily opens legacy memory/memory.db on first access.
     pub fn memory(&self) -> &semantic_memory::MemoryStore {
@@ -1600,9 +1591,7 @@ impl MnemesStore {
         normalized_namespaces.dedup();
         let normalized_terms = routing_tokens(routing_terms).join(" ");
         let namespaces_json = serde_json::to_string(&normalized_namespaces).map_err(|error| {
-            MnemesError::InvalidShardCatalog(format!(
-                "failed to serialize namespaces: {error}"
-            ))
+            MnemesError::InvalidShardCatalog(format!("failed to serialize namespaces: {error}"))
         })?;
         let refreshed_at = Utc::now().to_rfc3339();
         let conn = self.pool_conn.lock().await;
@@ -1793,9 +1782,7 @@ impl MnemesStore {
         request: RoutingSearchRequest,
     ) -> Result<RoutedSearchResponse, MnemesError> {
         if self.get_device(requester_device_id).await?.is_none() {
-            return Err(MnemesError::DeviceNotFound(
-                requester_device_id.to_string(),
-            ));
+            return Err(MnemesError::DeviceNotFound(requester_device_id.to_string()));
         }
         let catalog = self.list_shards().await?;
         let ranked = rank_shards(&request.query, requester_device_id, &catalog);
@@ -2394,10 +2381,7 @@ impl MnemesStore {
         Ok(())
     }
 
-    pub async fn list_audit_events(
-        &self,
-        limit: usize,
-    ) -> Result<Vec<AuditEvent>, MnemesError> {
+    pub async fn list_audit_events(&self, limit: usize) -> Result<Vec<AuditEvent>, MnemesError> {
         let conn = self.pool_conn.lock().await;
         let effective_limit = if limit == 0 { 100 } else { limit };
         let mut stmt = conn.prepare(
@@ -2843,9 +2827,7 @@ impl MnemesStore {
             .map(|value| serde_json::from_str(value))
             .transpose()
             .map_err(|error| {
-                MnemesError::InvalidProvenance(format!(
-                    "invalid normalized metadata JSON: {error}"
-                ))
+                MnemesError::InvalidProvenance(format!("invalid normalized metadata JSON: {error}"))
             })?;
 
         let existing = Self::existing_edges(conn, &request)?;
@@ -3650,6 +3632,9 @@ mod tests {
 
     #[test]
     fn provider_name_does_not_silently_fallback_unknown_values() {
-        assert_eq!(configured_provider_name(Some("custom-provider")), "custom-provider");
+        assert_eq!(
+            configured_provider_name(Some("custom-provider")),
+            "custom-provider"
+        );
     }
 }

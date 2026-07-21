@@ -1,7 +1,7 @@
 #[cfg(feature = "server")]
 use crate::{
-    Actor, ActorId, Device, DeviceId, OperationEnvelope, OperationId, OperationKind,
-    MnemesError, MnemesStore, ToolProfile,
+    Actor, ActorId, Device, DeviceId, MnemesError, MnemesStore, OperationEnvelope, OperationId,
+    OperationKind, ToolProfile,
 };
 #[cfg(feature = "server")]
 use axum::{
@@ -419,9 +419,7 @@ fn bearer_token(headers: &HeaderMap) -> Result<String, MnemesError> {
     let value = headers
         .get("authorization")
         .ok_or(MnemesError::InvalidCredential)?;
-    let raw = value
-        .to_str()
-        .map_err(|_| MnemesError::InvalidCredential)?;
+    let raw = value.to_str().map_err(|_| MnemesError::InvalidCredential)?;
     if !raw.starts_with("Bearer ") {
         return Err(MnemesError::InvalidCredential);
     }
@@ -521,8 +519,8 @@ fn error_response(error: &MnemesError) -> Response {
 
 #[cfg(feature = "server")]
 fn ensure_operator(actor: Option<&Actor>) -> Result<(), MnemesError> {
-    let actor = actor
-        .ok_or_else(|| MnemesError::AuthorizationDenied("actor required".to_string()))?;
+    let actor =
+        actor.ok_or_else(|| MnemesError::AuthorizationDenied("actor required".to_string()))?;
     if actor.tool_profile != ToolProfile::Operator {
         return Err(MnemesError::AuthorizationDenied(
             "operator profile required".to_string(),
@@ -541,18 +539,9 @@ async fn health_handler(headers: HeaderMap, State(state): State<ServerState>) ->
     let mut embedding = HashMap::new();
     embedding.insert(
         "dimensions",
-        state
-            .store
-            .memory()
-            .config()
-            .embedding
-            .dimensions
-            .to_string(),
+        state.store.memory_config().embedding.dimensions.to_string(),
     );
-    embedding.insert(
-        "model",
-        state.store.memory().config().embedding.model.clone(),
-    );
+    embedding.insert("model", state.store.memory_config().embedding.model.clone());
 
     let response = HealthResponse {
         service_id: state.server_id.clone(),
@@ -1207,9 +1196,7 @@ async fn submit_operation_handler(
     {
         Ok(Some(envelope)) => envelope,
         Ok(None) => {
-            return error_response(&MnemesError::InvalidAsOf(
-                "operation not found".to_string(),
-            ))
+            return error_response(&MnemesError::InvalidAsOf("operation not found".to_string()))
         }
         Err(error) => return error_response(&error),
     };
@@ -1336,9 +1323,7 @@ async fn get_operation_handler(
     let envelope = match state.store.get_operation(&operation_id).await {
         Ok(Some(value)) => value,
         Ok(None) => {
-            return error_response(&MnemesError::InvalidAsOf(
-                "operation not found".to_string(),
-            ))
+            return error_response(&MnemesError::InvalidAsOf("operation not found".to_string()))
         }
         Err(error) => return error_response(&error),
     };
@@ -1393,9 +1378,7 @@ async fn get_receipt_handler(
     let envelope = match state.store.get_operation_by_receipt(&receipt_id).await {
         Ok(Some(envelope)) => envelope,
         Ok(None) => {
-            return error_response(&MnemesError::InvalidAsOf(
-                "receipt not found".to_string(),
-            ))
+            return error_response(&MnemesError::InvalidAsOf("receipt not found".to_string()))
         }
         Err(error) => return error_response(&error),
     };
@@ -1689,9 +1672,7 @@ fn hidden_tool(name: &str) -> bool {
 }
 
 #[cfg(feature = "server")]
-fn parse_tool_call(
-    params: Option<&Value>,
-) -> Result<(Option<String>, String, Value), MnemesError> {
+fn parse_tool_call(params: Option<&Value>) -> Result<(Option<String>, String, Value), MnemesError> {
     let params_obj = params
         .and_then(Value::as_object)
         .ok_or_else(|| MnemesError::InvalidAsOf("params must be object".to_string()))?;
@@ -1735,9 +1716,7 @@ fn parse_actor_id_param(params: Option<&Value>) -> Result<Option<ActorId>, Mneme
 }
 
 #[cfg(feature = "server")]
-fn parse_operation_source_types(
-    raw: &[String],
-) -> Result<Vec<SearchSourceType>, MnemesError> {
+fn parse_operation_source_types(raw: &[String]) -> Result<Vec<SearchSourceType>, MnemesError> {
     raw.iter()
         .map(|value| match value.to_lowercase().as_str() {
             "facts" | "fact" => Ok(SearchSourceType::Facts),
@@ -1913,12 +1892,10 @@ async fn sync_endpoint(
     // replay the semantic-memory mutation against the replica DB).
     let dispatch = |conn: &rusqlite::Connection, _kind: &str, payload: &[u8]| {
         // Decode payload as UTF-8 SQL batch and execute it
-        let sql = std::str::from_utf8(payload).map_err(|e| {
-            MnemesError::Replication(format!("payload not valid UTF-8 SQL: {e}"))
-        })?;
-        conn.execute_batch(sql).map_err(|e| {
-            MnemesError::Replication(format!("replay SQL batch failed: {e}"))
-        })
+        let sql = std::str::from_utf8(payload)
+            .map_err(|e| MnemesError::Replication(format!("payload not valid UTF-8 SQL: {e}")))?;
+        conn.execute_batch(sql)
+            .map_err(|e| MnemesError::Replication(format!("replay SQL batch failed: {e}")))
     };
     match crate::sync_handler::process_sync_request(
         request,
@@ -1935,18 +1912,9 @@ async fn build_health_payload(state: &ServerState) -> HealthResponse {
     let mut embedding = HashMap::new();
     embedding.insert(
         "dimensions",
-        state
-            .store
-            .memory()
-            .config()
-            .embedding
-            .dimensions
-            .to_string(),
+        state.store.memory_config().embedding.dimensions.to_string(),
     );
-    embedding.insert(
-        "model",
-        state.store.memory().config().embedding.model.clone(),
-    );
+    embedding.insert("model", state.store.memory_config().embedding.model.clone());
     let ready = matches!(state.store.quick_check().await, Ok(ref value) if value == "ok");
 
     HealthResponse {
@@ -2006,9 +1974,8 @@ async fn mcp_handler(
         "tools/call" => {
             let tool_result: Result<Value, MnemesError> = (async {
                 let (actor_id_raw, name, args) = parse_tool_call(request.params.as_ref())?;
-                let actor_id = actor_id_raw.ok_or_else(|| {
-                    MnemesError::InvalidAsOf("actor_id required".to_string())
-                })?;
+                let actor_id = actor_id_raw
+                    .ok_or_else(|| MnemesError::InvalidAsOf("actor_id required".to_string()))?;
                 let actor_id = parse_actor_id(&actor_id)?;
                 let context = authorize(&state, &headers, Some(actor_id)).await?;
 
@@ -2032,9 +1999,7 @@ async fn mcp_handler(
                 }
 
                 if !is_read_tool && !is_operator_tool {
-                    return Err(MnemesError::InvalidAsOf(
-                        "unsupported tool".to_string(),
-                    ));
+                    return Err(MnemesError::InvalidAsOf("unsupported tool".to_string()));
                 }
 
                 let response = match name.as_str() {
@@ -2068,9 +2033,7 @@ async fn mcp_handler(
                             last_seen_at: device.last_seen_at,
                         })
                         .map_err(|error| {
-                            MnemesError::InvalidAsOf(format!(
-                                "failed to serialize result: {error}"
-                            ))
+                            MnemesError::InvalidAsOf(format!("failed to serialize result: {error}"))
                         })?
                     }
                     "sm_list_devices" => {
@@ -2090,17 +2053,13 @@ async fn mcp_handler(
                                 .collect::<Vec<_>>(),
                         )
                         .map_err(|error| {
-                            MnemesError::InvalidAsOf(format!(
-                                "failed to serialize result: {error}"
-                            ))
+                            MnemesError::InvalidAsOf(format!("failed to serialize result: {error}"))
                         })?
                     }
                     "sm_get_actor" => {
                         let tool_request: McpActorRequest = serde_json::from_value(args.clone())
                             .map_err(|_| {
-                                MnemesError::InvalidAsOf(
-                                    "invalid sm_get_actor args".to_string(),
-                                )
+                                MnemesError::InvalidAsOf("invalid sm_get_actor args".to_string())
                             })?;
                         let actor_id = parse_actor_id(&tool_request.actor_id)?;
                         let actor = state.store.get_actor(&actor_id).await?.ok_or_else(|| {
@@ -2120,9 +2079,7 @@ async fn mcp_handler(
                             recorded_at: actor.recorded_at,
                         })
                         .map_err(|error| {
-                            MnemesError::InvalidAsOf(format!(
-                                "failed to serialize result: {error}"
-                            ))
+                            MnemesError::InvalidAsOf(format!("failed to serialize result: {error}"))
                         })?
                     }
                     "sm_get_operation" => {
@@ -2142,9 +2099,7 @@ async fn mcp_handler(
                                 .get_operation(&operation_id)
                                 .await?
                                 .ok_or_else(|| {
-                                    MnemesError::InvalidAsOf(
-                                        "operation not found".to_string(),
-                                    )
+                                    MnemesError::InvalidAsOf("operation not found".to_string())
                                 })?;
                         if envelope.requesting_device_id != context.device.device_id {
                             return Err(MnemesError::AuthorizationDenied(
@@ -2175,17 +2130,13 @@ async fn mcp_handler(
                             receipt_id: envelope.receipt_id,
                         })
                         .map_err(|error| {
-                            MnemesError::InvalidAsOf(format!(
-                                "failed to serialize result: {error}"
-                            ))
+                            MnemesError::InvalidAsOf(format!("failed to serialize result: {error}"))
                         })?
                     }
                     "sm_search_witnessed" => {
                         let tool_request: McpSearchRequest = serde_json::from_value(args.clone())
                             .map_err(|_| {
-                            MnemesError::InvalidAsOf(
-                                "invalid sm_search_witnessed args".to_string(),
-                            )
+                            MnemesError::InvalidAsOf("invalid sm_search_witnessed args".to_string())
                         })?;
                         serde_json::to_value(run_witnessed_search(&state, tool_request).await?)
                             .map_err(|error| {
@@ -2210,9 +2161,7 @@ async fn mcp_handler(
                             })?,
                         })
                         .map_err(|error| {
-                            MnemesError::InvalidAsOf(format!(
-                                "failed to serialize result: {error}"
-                            ))
+                            MnemesError::InvalidAsOf(format!("failed to serialize result: {error}"))
                         })?
                     }
                     "sm_health" => serde_json::to_value(build_health_payload(&state).await)
@@ -2277,17 +2226,13 @@ async fn mcp_handler(
                             status: device.status.as_str().to_string(),
                         })
                         .map_err(|error| {
-                            MnemesError::InvalidAsOf(format!(
-                                "failed to serialize result: {error}"
-                            ))
+                            MnemesError::InvalidAsOf(format!("failed to serialize result: {error}"))
                         })?
                     }
                     "sm_revoke_device" => {
                         let tool_request: McpDeviceRequest = serde_json::from_value(args.clone())
                             .map_err(|_| {
-                            MnemesError::InvalidAsOf(
-                                "invalid sm_revoke_device args".to_string(),
-                            )
+                            MnemesError::InvalidAsOf("invalid sm_revoke_device args".to_string())
                         })?;
                         let device_id = parse_device_id(&tool_request.device_id)?;
                         state.store.revoke_device(&device_id).await?;
@@ -2391,9 +2336,7 @@ async fn mcp_handler(
                             recorded_at: envelope.recorded_at,
                         })
                         .map_err(|error| {
-                            MnemesError::InvalidAsOf(format!(
-                                "failed to serialize result: {error}"
-                            ))
+                            MnemesError::InvalidAsOf(format!("failed to serialize result: {error}"))
                         })?
                     }
                     "sm_verify_integrity" => {
@@ -2429,16 +2372,10 @@ async fn mcp_handler(
                             },
                         })
                         .map_err(|error| {
-                            MnemesError::InvalidAsOf(format!(
-                                "failed to serialize result: {error}"
-                            ))
+                            MnemesError::InvalidAsOf(format!("failed to serialize result: {error}"))
                         })?
                     }
-                    _ => {
-                        return Err(MnemesError::InvalidAsOf(
-                            "unsupported tool".to_string(),
-                        ))
-                    }
+                    _ => return Err(MnemesError::InvalidAsOf("unsupported tool".to_string())),
                 };
                 Ok(response)
             })
