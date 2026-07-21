@@ -1436,8 +1436,13 @@ impl MnemesStore {
                 base_dir: legacy.parent().unwrap_or(&legacy).to_path_buf(),
                 ..self.memory_config.clone()
             };
-            semantic_memory::MemoryStore::open(config)
-                .unwrap_or_else(|e| panic!("legacy memory store: {e:?}"))
+            semantic_memory::MemoryStore::open_with_embedder(
+                config,
+                Box::new(SharedEmbedder {
+                    inner: self.embedder.clone(),
+                }),
+            )
+            .unwrap_or_else(|e| panic!("legacy memory store: {e:?}"))
         })
     }
 
