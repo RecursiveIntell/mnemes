@@ -12,7 +12,7 @@
 
 ## 0. Current evidence and hard boundary
 
-**Observed 2026-07-20:** `/home/sikmindz/Coding/pooled-memory` is on `master` at `7f5d23cae659c8572c5e2d2e35f58f79ebb87f71` with an uncommitted central-shard implementation. `cargo fmt --check` and `git diff --check` pass. Existing shard/router tests and migration tooling are prior evidence, not proof of replication.
+**Observed 2026-07-20:** `/home/sikmindz/Coding/mnemes` is on `master` at `7f5d23cae659c8572c5e2d2e35f58f79ebb87f71` with an uncommitted central-shard implementation. `cargo fmt --check` and `git diff --check` pass. Existing shard/router tests and migration tooling are prior evidence, not proof of replication.
 
 **Dependency boundary:** `semantic-memory = { path = "../Libraries/semantic-memory" }`. Do not edit `/home/sikmindz/Coding/Libraries` in this worktree. Any canonical journal/replay implementation belongs in a separately reviewed semantic-memory worktree and must be consumed through an explicit dependency revision.
 
@@ -46,7 +46,7 @@ Phase 0 evidence/inventory
                           -> Phase 9 Hermes/Codex and production admission
 ```
 
-Phases 1–2 may land in pooled-memory as verification-only infrastructure. Phases 3–9 remain blocked until their predecessors are independently reviewed.
+Phases 1–2 may land in mnemes as verification-only infrastructure. Phases 3–9 remain blocked until their predecessors are independently reviewed.
 
 ## 3. Exact work packages
 
@@ -138,7 +138,7 @@ Verify Hermes/Codex parity, local-first device operation, MSI server replica rou
 
 ## 5. Required commands and receipts
 
-Before each mutating phase refresh: `git status --short --branch`, `git rev-parse HEAD`, dependency revision, applicable `AGENTS.md`, and listener/process state. Preserve `/tmp/pooled-memory-pre-replication.patch` and its digest as rollback evidence.
+Before each mutating phase refresh: `git status --short --branch`, `git rev-parse HEAD`, dependency revision, applicable `AGENTS.md`, and listener/process state. Preserve `/tmp/mnemes-pre-replication.patch` and its digest as rollback evidence.
 
 Per-phase gates:
 

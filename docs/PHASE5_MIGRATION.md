@@ -32,19 +32,19 @@ Reconciliation fails closed if:
 ## Cutover gates
 
 1. Seal exact source generation and rollback archives.
-2. Build/test/clippy pooled-memory against canonical semantic-memory schema 36.
+2. Build/test/clippy mnemes against canonical semantic-memory schema 36.
 3. Stop the laptop semantic-memory owner and verify no writer holds its DB.
-4. Stop pooled-memory and verify no writer holds the central data directory.
+4. Stop mnemes and verify no writer holds the central data directory.
 5. Create final source snapshots; never copy SQLite/WAL files directly.
 6. Reconcile and verify the final merged manifest.
-7. Archive the complete pre-cutover pooled-memory data directory.
+7. Archive the complete pre-cutover mnemes data directory.
 8. Install the schema-36 release binaries atomically.
 9. Replace only the central semantic-memory projection directory from the verified merged envelope.
-10. Restart pooled-memory and require authenticated integrity, stats, witnessed retrieval, Hermes MCP discovery, Codex wrapper, and source/target row-manifest parity.
+10. Restart mnemes and require authenticated integrity, stats, witnessed retrieval, Hermes MCP discovery, Codex wrapper, and source/target row-manifest parity.
 11. Restart laptop semantic-memory in shadow-read mode until parity is accepted; do not delete legacy stores.
 
 ## Rollback
 
-Stop pooled-memory, atomically move the failed data directory to quarantine, restore the complete pre-cutover archive, restore the previous server/admin binaries, restart, and verify authenticated integrity. Source stores and signed migration envelopes remain untouched.
+Stop mnemes, atomically move the failed data directory to quarantine, restore the complete pre-cutover archive, restore the previous server/admin binaries, restart, and verify authenticated integrity. Source stores and signed migration envelopes remain untouched.
 
 Source parity rollback restores the dated `msi-libraries-pre-sync.tar.gz` archive. The sealed schema-36 owner source archive is the reproducible build witness for the migrated generation.

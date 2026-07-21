@@ -124,7 +124,7 @@ The manifest contains hashes, including a canonical SHA-256 witness of the locke
 1. Build and test release binaries.
 2. Stage shards outside the live data directory.
 3. Verify stage manifest and source envelope hashes.
-4. Stop pooled-memory and prove zero DB handles.
+4. Stop mnemes and prove zero DB handles.
 5. Archive the complete data directory, including `.routing-receipt-hmac.key` when present, and current binaries.
 6. Move old `memory/` to the rollback directory.
 7. Move staged `memory/` into the live data directory.
