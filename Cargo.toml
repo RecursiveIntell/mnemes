@@ -14,11 +14,18 @@ keywords = ["memory", "multi-device", "provenance", "agent", "semantic"]
 categories = ["database", "text-processing", "development-tools"]
 
 [features]
-default = ["server"]
+default = ["server", "candle-local"]
 server = ["dep:axum", "dep:tower", "dep:tower-http"]
+# In-process Candle/Nomic embedder for local deployments. Shared-pool
+# deployments may select another provider at runtime or inject a custom
+# Embedder through the library API.
+candle-local = ["semantic-memory/candle-embedder"]
+# Enables semantic-memory's compatible truncated-vector search path. It remains
+# opt-in because stored indexes must be built for the selected candidate size.
+matryoshka = ["semantic-memory/matryoshka"]
 
 [dependencies]
-semantic-memory = "0.5"
+semantic-memory = { version = "0.5", default-features = false, features = ["usearch-backend"] }
 rusqlite = { version = "0.32", features = ["bundled", "blob"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "net"] }
 serde = { version = "1", features = ["derive"] }

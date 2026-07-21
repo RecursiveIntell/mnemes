@@ -25,6 +25,48 @@ const DEFAULT_SHARD_CACHE_CAPACITY: usize = 4;
 const POOLED_SCHEMA_GENERATION: i64 = 1;
 const RECEIPT_AUTH_KEY_FILE: &str = ".routing-receipt-hmac.key";
 
+/// Construct the process-wide embedder selected for the default server path.
+///
+/// `candle` is the default because it is local, in-process, and avoids a
+/// second service hop. Shared-pool operators can select `ollama` (or inject
+/// any implementation through `open_with_embedder`) without changing the
+/// store or index contracts.
+fn configured_provider_name(value: Option<&str>) -> String {
+    value
+        .unwrap_or("candle")
+        .trim()
+        .to_ascii_lowercase()
+}
+
+fn configured_embedder(
+    memory_config: &semantic_memory::MemoryConfig,
+) -> Result<Box<dyn semantic_memory::Embedder>, MnemesError> {
+    let provider = configured_provider_name(std::env::var("MNEMES_EMBEDDER").ok().as_deref());
+
+    match provider.as_str() {
+        "candle" | "local" => {
+            #[cfg(feature = "candle-local")]
+            {
+                Ok(Box::new(semantic_memory::CandleEmbedder::try_new(
+                    &memory_config.embedding,
+                )?))
+            }
+            #[cfg(not(feature = "candle-local"))]
+            {
+                Err(MnemesError::InvalidShardCatalog(
+                    "MNEMES_EMBEDDER=candle requires the candle-local feature".to_string(),
+                ))
+            }
+        }
+        "ollama" | "http" => Ok(Box::new(semantic_memory::OllamaEmbedder::try_new(
+            &memory_config.embedding,
+        )?)),
+        other => Err(MnemesError::InvalidShardCatalog(format!(
+            "unsupported MNEMES_EMBEDDER provider `{other}`; use candle, ollama, or open_with_embedder"
+        ))),
+    }
+}
+
 #[derive(Clone)]
 struct SharedEmbedder {
     inner: Arc<dyn semantic_memory::Embedder>,
@@ -325,11 +367,11 @@ impl MnemesStore {
         base_dir: PathBuf,
         memory_config: semantic_memory::MemoryConfig,
     ) -> Result<Self, MnemesError> {
-        let embedder = semantic_memory::OllamaEmbedder::try_new(&memory_config.embedding)?;
+        let embedder = configured_embedder(&memory_config)?;
         Self::open_with_shared_embedder(
             base_dir,
             memory_config,
-            Arc::new(embedder),
+            Arc::from(embedder),
             DEFAULT_SHARD_CACHE_CAPACITY,
         )
     }
@@ -3597,5 +3639,17 @@ mod tests {
         let actors = store.list_actors().await.unwrap();
         assert_eq!(devices.len(), 1);
         assert_eq!(actors.len(), 1);
+    }
+
+    #[test]
+    fn provider_name_defaults_to_candle_and_normalizes_aliases() {
+        assert_eq!(configured_provider_name(None), "candle");
+        assert_eq!(configured_provider_name(Some("  LOCAL ")), "local");
+        assert_eq!(configured_provider_name(Some("OLLAMA")), "ollama");
+    }
+
+    #[test]
+    fn provider_name_does_not_silently_fallback_unknown_values() {
+        assert_eq!(configured_provider_name(Some("custom-provider")), "custom-provider");
     }
 }

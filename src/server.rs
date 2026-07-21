@@ -2467,10 +2467,23 @@ async fn mcp_handler(
 #[cfg(feature = "server")]
 pub fn build_memory_store(base_dir: &str) -> Result<MnemesStore, MnemesError> {
     let db_dir = PathBuf::from(base_dir);
-    let memory_config = MemoryConfig {
+    let mut memory_config = MemoryConfig {
         base_dir: db_dir.join("memory"),
         ..Default::default()
     };
+    if let Ok(url) = std::env::var("MNEMES_OLLAMA_URL") {
+        memory_config.embedding.ollama_url = url;
+    }
+    if let Ok(model) = std::env::var("MNEMES_EMBEDDING_MODEL") {
+        memory_config.embedding.model = model;
+    }
+    if let Ok(dimensions) = std::env::var("MNEMES_EMBEDDING_DIMENSIONS") {
+        memory_config.embedding.dimensions = dimensions.parse().map_err(|_| {
+            MnemesError::InvalidShardCatalog(
+                "MNEMES_EMBEDDING_DIMENSIONS must be a positive integer".to_string(),
+            )
+        })?;
+    }
     MnemesStore::open(db_dir, memory_config)
 }
 

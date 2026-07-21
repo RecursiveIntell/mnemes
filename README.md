@@ -61,6 +61,29 @@ memory/shards/<device_uuid>/memory.db  ←  one semantic-memory store per device
 
 The control plane and semantic stores are **physically separate**. `pooled.db` owns pooling metadata and receipts. Each `memory.db` is owned by the `semantic-memory` engine. Once replication is implemented, the home-device generation is canonical and the server generation is a replayable replica.
 
+### Embedding provider selection
+
+Mnemes keeps the embedding provider behind `semantic_memory::Embedder`:
+
+- local deployments default to the in-process Candle provider when the default `candle-local` feature is enabled;
+- shared-pool operators may select Ollama/HTTP with `MNEMES_EMBEDDER=ollama`;
+- library users may inject any provider implementation with `MnemesStore::open_with_embedder`;
+- future peer-first routing will select a compatible connected provider before invoking the UNO Q/local fallback.
+
+```bash
+# Local default: Candle/Nomic, no Ollama service required
+cargo run --bin mnemes-server
+
+# Select an HTTP/Ollama-compatible provider for a shared pool
+MNEMES_EMBEDDER=ollama \\
+MNEMES_OLLAMA_URL=http://127.0.0.1:11434 \\
+MNEMES_EMBEDDING_MODEL=nomic-embed-text \\
+MNEMES_EMBEDDING_DIMENSIONS=768 \\
+cargo run --bin mnemes-server
+```
+
+`EmbeddingConfig` remains the compatibility contract for model, dimensions, batch size, and timeout. A provider that returns a different dimension is rejected; mnemes does not silently mix embedding spaces. Provider selection is configuration, not proof that a remote peer broker is already active.
+
 ---
 
 ## Quick start
