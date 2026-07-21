@@ -168,11 +168,37 @@ The `semantic-memory` crate needs an HTTP embedder adapter that calls `hermes-in
 | hermes-infer embedding extension not built | High | Phase 2 is blocking; interim is routing-only mode without local embeddings |
 | SQLite ARM64 performance | Low | A53 @2GHz is adequate for metadata + routing; embeddings are the bottleneck |
 
-## 6. Open questions (need user input)
+## 6. Resolved UNO Q details (from semantic memory)
 
-1. **What is the custom OS?** Kernel version, init system, libc, package manager?
-2. **Storage type?** eMMC, SD card, NVMe? Available space?
-3. **Network configuration?** Static IP? Hostname? SSH access details?
-4. **Should Qwen3.5-0.8B run on UNO Q or stay on MSI?** 4GB can handle it on-demand but it's tight.
-5. **Is hermes-infer already extended with embedding support?** Or is that still pending?
-6. **UNO Q SSH alias?** Need to add to `~/.ssh/config` for the tunnel service.
+| Question | Answer |
+|---|---|
+| **OS** | Debian 13 (Trixie) aarch64, kernel 6.12-sdm670-1. Vendor-provided, not custom. |
+| **Init system** | systemd (but no user bus via ADB). Durability via `crontab @reboot`. |
+| **Storage** | 32GB eMMC. 4GB LPDDR4 RAM (3.6GB usable, ~3.0GB free). |
+| **Network** | WiFi 5, `PurpleMama_5G`, static IP **192.168.50.249**. |
+| **SSH** | Port **2222** (unprivileged sshd). `~/.ssh/roko.pub` in authorized_keys. Port 22 inactive (sudo-gated). `@reboot` cron starts sshd. |
+| **ADB** | Device `2207799355` (USB-C data port). |
+| **Qwen3.5-0.8B** | Already running via Ollama at `localhost:11434`, 4.2 t/s decode. |
+| **hermes-infer** | C engine compiles but crashes during forward pass (SIGSEGV). Pivoted to Ollama. Embedding extension (~150 lines BERT encoder) not yet built. |
+| **Ollama** | Installed and running. Port 11434 is the only externally accessible HTTP port. |
+| **GCC** | 14.2 on device. Native Rust compilation possible but slow; no Rust currently installed. |
+
+### SSH alias for tunnel
+
+Add to `~/.ssh/config`:
+```
+Host uno-q
+    HostName 192.168.50.249
+    Port 2222
+    User arduino
+    IdentityFile ~/.ssh/roko
+```
+
+### Key deployment changes from resolved details
+
+1. **Not a custom OS** — it's Debian 13. No special sysroot needed; standard aarch64-unknown-linux-gnu target works.
+2. **No systemd user sessions via ADB** — mnemes-server must use `crontab @reboot` like the existing agent, or SSH in and use systemd if available.
+3. **SSH already works on port 2222** — tunnel can point to `uno-q:2222` instead of `msi:22`.
+4. **Qwen3.5-0.8B stays on UNO Q** — already running via Ollama. No need to move it.
+5. **hermes-infer embedding extension is the remaining blocker** — without it, mnemes-server on UNO Q would need to use Ollama for embeddings (which works but is slower than a dedicated C endpoint).
+6. **Native compilation is viable** — GCC 14.2 is on device. Installing Rust and building natively would take ~10-20 min but avoids cross-compilation complexity. The previous QEMU podman build attempt was too slow; native build on device is the practical path.
