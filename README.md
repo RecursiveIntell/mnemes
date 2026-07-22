@@ -87,12 +87,14 @@ cargo run --bin mnemes-server
 
 ---
 
-## Quick start
+## Set up a shared memory server
 
-### Install
+Mnemes runs as a standalone HTTP server on any machine you choose — a home server, a VPS, a laptop, or a GPU box. Each device that connects to it gets its own isolated semantic-memory shard, and searches route across all eligible shards with durable receipts.
+
+### 1. Install the binaries
 
 ```bash
-# From crates.io
+# From crates.io (recommended)
 cargo install mnemes --locked
 
 # Or from source
@@ -101,7 +103,138 @@ cd mnemes
 cargo install --path .
 ```
 
-### As a library
+This gives you two binaries:
+- `mnemes-server` — the HTTP server
+- `mnemes-admin` — the bootstrap/admin CLI
+
+### 2. Bootstrap the first device
+
+Every mnemes server starts empty. Bootstrap creates the first device (the server itself) and generates a credential you'll use to authenticate API calls:
+
+```bash
+mnemes-admin bootstrap ~/.local/share/mnemes "home-server" "linux" "myserver.local"
+```
+
+Output:
+```json
+{
+  "device_id": "a1b2c3d4-...",
+  "actor_id": "e5f6g7h8-...",
+  "credential": "base64-encoded-credential",
+  "profile": "operator",
+  "created_at": "2026-07-21T..."
+}
+```
+
+Save the `device_id` and `credential` — you'll need them to connect devices.
+
+### 3. Choose your embedding provider
+
+Mnemes defaults to the in-process Candle embedder (nomic-embed-text-v1.5, 768d, CPU-only, no external service required). On a GPU box you might prefer Ollama for faster embeddings:
+
+```bash
+# Option A: Candle (default — zero external dependencies)
+# No config needed; just start the server.
+
+# Option B: Ollama (GPU-accelerated, requires `ollama serve` running)
+export MNEMES_EMBEDDER=ollama
+export MNEMES_OLLAMA_URL=http://127.0.0.1:11434
+export MNEMES_EMBEDDING_MODEL=nomic-embed-text
+export MNEMES_EMBEDDING_DIMENSIONS=768
+```
+
+### 4. Start the server
+
+```bash
+# Basic: start on port 1738 with data at ~/.local/share/mnemes
+mnemes-server 1738 ~/.local/share/mnemes
+
+# With environment variables
+MNEMES_PORT=1738 MNEMES_DATA_DIR=~/.local/share/mnemes mnemes-server
+```
+
+### 5. Run as a systemd service (recommended)
+
+```ini
+# ~/.config/systemd/user/mnemes.service
+[Unit]
+Description=Mnemes memory authority service
+After=network.target
+
+[Service]
+Type=simple
+EnvironmentFile=%h/.config/mnemes/server.env
+ExecStart=%h/.cargo/bin/mnemes-server ${MNEMES_PORT} ${MNEMES_DATA_DIR}
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/mnemes %h/.cache/huggingface
+LockPersonality=true
+
+[Install]
+WantedBy=default.target
+```
+
+```bash
+# Create the env file
+mkdir -p ~/.config/mnemes
+cat > ~/.config/mnemes/server.env << 'EOF'
+MNEMES_PORT=1738
+MNEMES_DATA_DIR=/home/you/.local/share/mnemes
+# MNEMES_EMBEDDER=ollama
+# MNEMES_OLLAMA_URL=http://127.0.0.1:11434
+# HF_HUB_OFFLINE=1
+EOF
+
+# Enable and start
+systemctl --user daemon-reload
+systemctl --user enable --now mnemes.service
+systemctl --user is-active mnemes.service  # → active
+```
+
+### 6. Connect a device
+
+From any other machine, register it as a device on your mnemes server and start syncing:
+
+```bash
+# Register a new device (returns a credential)
+curl -X POST http://your-server:1738/v1/devices/register \
+  -H "Authorization: Bearer <operator-credential>" \
+  -H "Content-Type: application/json" \
+  -d '{"label":"laptop","platform":"linux","hostname":"mylaptop.local"}'
+
+# The server returns a device_id + credential.
+# Store them in ~/.config/mnemes/client.env on the device.
+```
+
+### 7. Verify
+
+```bash
+# Health check
+curl http://127.0.0.1:1738/v1/health
+
+# Search (requires auth)
+curl -X POST http://127.0.0.1:1738/v1/search/witnessed \
+  -H "Authorization: Bearer <device-credential>" \
+  -H "Content-Type: application/json" \
+  -d '{"query":"test","limit":5}'
+```
+
+### Embedding provider notes
+
+| Provider | Setup | Speed | Best for |
+|---|---|---|---|
+| **Candle** (default) | None — downloads nomic-embed-text-v1.5 from HuggingFace on first run (~274MB, cached) | ~138ms/embed on CPU | Laptops, servers without GPU |
+| **Ollama** | `ollama pull nomic-embed-text` then set `MNEMES_EMBEDDER=ollama` | ~33ms/embed with GPU | GPU servers, shared pools with low latency |
+
+If the server runs in a sandboxed environment (systemd `ProtectSystem=strict`), add `~/.cache/huggingface` to `ReadWritePaths` so Candle can cache the model, or set `HF_HUB_OFFLINE=1` after pre-downloading.
+
+---
+
+## Use as a library
 
 ```rust
 use mnemes::{MnemesStore, Device, DeviceId, Actor, ActorKind, ActorId};
