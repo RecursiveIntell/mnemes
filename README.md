@@ -89,6 +89,8 @@ cargo run --bin mnemes-server
 
 ## Set up a shared memory server
 
+> **Agent-driven setup:** Every step below is a shell command or file edit. Point your AI coding agent (Hermes, Claude Code, Codex, Cursor, etc.) at this README and say *"Set up a mnemes server on this machine"* — the agent can install, bootstrap, configure systemd, and verify, all from the instructions here.
+
 Mnemes runs as a standalone HTTP server on any machine you choose — a home server, a VPS, a laptop, or a GPU box. Each device that connects to it gets its own isolated semantic-memory shard, and searches route across all eligible shards with durable receipts.
 
 ### 1. Install the binaries
@@ -231,14 +233,6 @@ curl -X POST http://127.0.0.1:1738/v1/search/witnessed \
 | **Ollama** | `ollama pull nomic-embed-text` then set `MNEMES_EMBEDDER=ollama` | ~33ms/embed with GPU | GPU servers, shared pools with low latency |
 
 If the server runs in a sandboxed environment (systemd `ProtectSystem=strict`), add `~/.cache/huggingface` to `ReadWritePaths` so Candle can cache the model, or set `HF_HUB_OFFLINE=1` after pre-downloading.
-
-### Let an agent set it up for you
-
-Every step above is a shell command or a file edit. If you have an AI coding agent installed (Hermes, Claude Code, Codex, Cursor, etc.), you can point it at this README and say:
-
-> "Set up a mnemes server on this machine. Follow the guide at https://github.com/RecursiveIntell/mnemes#set-up-a-shared-memory-server — install, bootstrap, configure systemd, and verify it's running."
-
-The agent can run `cargo install`, `mnemes-admin bootstrap`, write the systemd unit and env files, enable the service, and verify with health checks — all from the instructions on this page. No manual steps required if the machine has Rust and SSH access.
 
 ---
 
