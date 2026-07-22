@@ -232,6 +232,14 @@ curl -X POST http://127.0.0.1:1738/v1/search/witnessed \
 
 If the server runs in a sandboxed environment (systemd `ProtectSystem=strict`), add `~/.cache/huggingface` to `ReadWritePaths` so Candle can cache the model, or set `HF_HUB_OFFLINE=1` after pre-downloading.
 
+### Let an agent set it up for you
+
+Every step above is a shell command or a file edit. If you have an AI coding agent installed (Hermes, Claude Code, Codex, Cursor, etc.), you can point it at this README and say:
+
+> "Set up a mnemes server on this machine. Follow the guide at https://github.com/RecursiveIntell/mnemes#set-up-a-shared-memory-server — install, bootstrap, configure systemd, and verify it's running."
+
+The agent can run `cargo install`, `mnemes-admin bootstrap`, write the systemd unit and env files, enable the service, and verify with health checks — all from the instructions on this page. No manual steps required if the machine has Rust and SSH access.
+
 ---
 
 ## Use as a library
