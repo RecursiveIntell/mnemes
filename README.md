@@ -68,6 +68,7 @@ Mnemes keeps the embedding provider behind `semantic_memory::Embedder`:
 - local deployments default to the in-process Candle provider when the default `candle-local` feature is enabled;
 - shared-pool operators may select Ollama/HTTP with `MNEMES_EMBEDDER=ollama`;
 - library users may inject any provider implementation with `MnemesStore::open_with_embedder`;
+- the witnessed search endpoint now routes through `MnemesStore::routed_search()` when active shards with facts are registered, falling back to legacy single-store search only in test/single-device mode;
 - future peer-first routing will select a compatible connected provider before invoking the UNO Q/local fallback.
 
 ```bash

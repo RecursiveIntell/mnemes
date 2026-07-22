@@ -1,6 +1,6 @@
 [package]
 name = "mnemes"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2021"
 rust-version = "1.75"
 description = "Multi-device memory control plane — device/actor provenance, bitemporal lineage, semantic shard routing, idempotent operation envelopes, and replication for local-first AI agents"
