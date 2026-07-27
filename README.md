@@ -62,7 +62,7 @@ Mnemes is the **product surface** of a three-crate stack:
 
 | Crate | Version | Role |
 |-------|---------|------|
-| [`semantic-memory`](https://crates.io/crates/semantic-memory) | v0.5.14 | Core library: SQLite store, HNSW vectors, FTS5 search, knowledge graph, trust ledger |
+| [`semantic-memory`](https://crates.io/crates/semantic-memory) | v0.6.0 | Core library: SQLite store, HNSW vectors, FTS5 search, knowledge graph, trust ledger |
 | [`semantic-memory-mcp`](https://crates.io/crates/semantic-memory-mcp) | v0.5.6 | MCP server: exposes 60+ tools to AI agents via stdio JSON-RPC |
 | **`mnemes`** (this crate) | v0.1.1 | Multi-device control plane: identity, routing, replication, pooled memory |
 
@@ -805,7 +805,7 @@ mnemes/                          # This crate
 
 ```
 Libraries/                       # Canonical workspace
-├── semantic-memory/             # Core library (v0.5.14)
+├── semantic-memory/             # Core library (v0.6.0)
 ├── semantic-memory-mcp/         # MCP server binary (v0.5.6)
 ├── semantic-memory-forge/       # Build/dev tooling
 └── agent-graph-mcp/             # Graph-orchestrated LLM workflows
