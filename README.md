@@ -22,6 +22,24 @@
 
 ---
 
+## Table of Contents
+
+1. [Overview](#overview)
+2. [Quick Start: Set Up a Server](#set-up-a-shared-memory-server)
+3. [Architecture](#architecture)
+4. [API Surface](#api-surface)
+5. [Use as a Library](#use-as-a-library)
+6. [The Semantic-Memory Engine](#the-semantic-memory-engine)
+7. [Retrieval Pipeline](#retrieval-pipeline)
+8. [Knowledge Graph](#knowledge-graph)
+9. [Trust & Provenance](#trust--provenance)
+10. [Data Model](#data-model)
+11. [Memory Lifecycle](#memory-lifecycle)
+12. [Performance & Scaling](#performance--scaling)
+13. [Security & Governance](#security--governance)
+
+---
+
 ## Overview
 
 **Mnemes** (from Greek μνήμη, "memory") is a Rust crate that adds a multi-device identity, synchronization, and routing layer on top of [`semantic-memory`](https://github.com/RecursiveIntell/semantic-memory). It enables a routing brain where laptops, GPU servers, edge devices, and phones can share authorized search results from separate device-owned stores while preserving full provenance:
@@ -37,6 +55,16 @@
 | **Signed replication** | Ed25519-signed mutation envelopes for device-to-server journal replay (in development) |
 
 > **Architecture status:** The current candidate implements server-side per-device shards and sparse routing. The target design keeps each canonical database on its home device and synchronizes a durable server replica. Continuous replication is under development — see [docs/DEVICE_OWNED_REPLICATED_MEMORY.md](docs/DEVICE_OWNED_REPLICATED_MEMORY.md).
+
+### The Full Stack
+
+Mnemes is the **product surface** of a three-crate stack:
+
+| Crate | Version | Role |
+|-------|---------|------|
+| [`semantic-memory`](https://crates.io/crates/semantic-memory) | v0.5.14 | Core library: SQLite store, HNSW vectors, FTS5 search, knowledge graph, trust ledger |
+| [`semantic-memory-mcp`](https://crates.io/crates/semantic-memory-mcp) | v0.5.6 | MCP server: exposes 60+ tools to AI agents via stdio JSON-RPC |
+| **`mnemes`** (this crate) | v0.1.1 | Multi-device control plane: identity, routing, replication, pooled memory |
 
 ## How it works
 
@@ -55,7 +83,7 @@ pooled.db  ←  device/actor/operation/provenance/routing control plane
 memory/shards/<device_uuid>/memory.db  ←  one semantic-memory store per device
     │
     ├── facts, documents, episodes, conversations
-    ├── embeddings, FTS5 indexes, vector (usearch)
+    ├── embeddings, FTS5 indexes, vector (HNSW)
     └── provenance, authority, search receipts
 ```
 
@@ -76,14 +104,21 @@ Mnemes keeps the embedding provider behind `semantic_memory::Embedder`:
 cargo run --bin mnemes-server
 
 # Select an HTTP/Ollama-compatible provider for a shared pool
-MNEMES_EMBEDDER=ollama \\
-MNEMES_OLLAMA_URL=http://127.0.0.1:11434 \\
-MNEMES_EMBEDDING_MODEL=nomic-embed-text \\
-MNEMES_EMBEDDING_DIMENSIONS=768 \\
+MNEMES_EMBEDDER=ollama \
+MNEMES_OLLAMA_URL=http://127.0.0.1:11434 \
+MNEMES_EMBEDDING_MODEL=nomic-embed-text \
+MNEMES_EMBEDDING_DIMENSIONS=768 \
 cargo run --bin mnemes-server
 ```
 
-`EmbeddingConfig` remains the compatibility contract for model, dimensions, batch size, and timeout. A provider that returns a different dimension is rejected; mnemes does not silently mix embedding spaces. Provider selection is configuration, not proof that a remote peer broker is already active.
+`EmbeddingConfig` remains the compatibility contract for model, dimensions, batch size, and timeout. A provider that returns a different dimension is rejected; mnemes does not silently mix embedding spaces.
+
+| Provider | Setup | Speed | Best for |
+|---|---|---|---|
+| **Candle** (default) | None — downloads nomic-embed-text-v1.5 from HuggingFace on first run (~274MB, cached) | ~138ms/embed on CPU | Laptops, servers without GPU |
+| **Ollama** | `ollama pull nomic-embed-text` then set `MNEMES_EMBEDDER=ollama` | ~33ms/embed with GPU | GPU servers, shared pools with low latency |
+
+If the server runs in a sandboxed environment (systemd `ProtectSystem=strict`), add `~/.cache/huggingface` to `ReadWritePaths` so Candle can cache the model, or set `HF_HUB_OFFLINE=1` after pre-downloading.
 
 ---
 
@@ -109,9 +144,25 @@ This gives you two binaries:
 - `mnemes-server` — the HTTP server
 - `mnemes-admin` — the bootstrap/admin CLI
 
-### 2. Bootstrap the first device
+For a guided host install that also offers private anywhere-access:
 
-Every mnemes server starts empty. Bootstrap creates the first device (the server itself) and generates a credential you'll use to authenticate API calls:
+```bash
+./install.sh --from-source --with-tailscale
+```
+
+The Tailscale step is explicit and idempotent. It can install Tailscale when requested, pause for normal browser authorization (or consume an auth-key file without printing it), enable Tailscale SSH, and configure **Tailscale Serve** to proxy Mnemes over tailnet-only HTTPS. Mnemes remains bound to loopback; the installer never enables Funnel or opens a LAN listener. For an existing Mnemes installation, run:
+
+```bash
+./install.sh --tailscale-only
+```
+
+Audit without changing anything:
+
+```bash
+scripts/setup-mnemes-tailscale.sh --audit
+```
+
+### 2. Bootstrap the first device
 
 ```bash
 mnemes-admin bootstrap ~/.local/share/mnemes "home-server" "linux" "myserver.local"
@@ -130,22 +181,7 @@ Output:
 
 Save the `device_id` and `credential` — you'll need them to connect devices.
 
-### 3. Choose your embedding provider
-
-Mnemes defaults to the in-process Candle embedder (nomic-embed-text-v1.5, 768d, CPU-only, no external service required). On a GPU box you might prefer Ollama for faster embeddings:
-
-```bash
-# Option A: Candle (default — zero external dependencies)
-# No config needed; just start the server.
-
-# Option B: Ollama (GPU-accelerated, requires `ollama serve` running)
-export MNEMES_EMBEDDER=ollama
-export MNEMES_OLLAMA_URL=http://127.0.0.1:11434
-export MNEMES_EMBEDDING_MODEL=nomic-embed-text
-export MNEMES_EMBEDDING_DIMENSIONS=768
-```
-
-### 4. Start the server
+### 3. Start the server
 
 ```bash
 # Basic: start on port 1738 with data at ~/.local/share/mnemes
@@ -155,7 +191,7 @@ mnemes-server 1738 ~/.local/share/mnemes
 MNEMES_PORT=1738 MNEMES_DATA_DIR=~/.local/share/mnemes mnemes-server
 ```
 
-### 5. Run as a systemd service (recommended)
+### 4. Run as a systemd service (recommended)
 
 ```ini
 # ~/.config/systemd/user/mnemes.service
@@ -181,7 +217,6 @@ WantedBy=default.target
 ```
 
 ```bash
-# Create the env file
 mkdir -p ~/.config/mnemes
 cat > ~/.config/mnemes/server.env << 'EOF'
 MNEMES_PORT=1738
@@ -191,28 +226,21 @@ MNEMES_DATA_DIR=/home/you/.local/share/mnemes
 # HF_HUB_OFFLINE=1
 EOF
 
-# Enable and start
 systemctl --user daemon-reload
 systemctl --user enable --now mnemes.service
 systemctl --user is-active mnemes.service  # → active
 ```
 
-### 6. Connect a device
-
-From any other machine, register it as a device on your mnemes server and start syncing:
+### 5. Connect a device
 
 ```bash
-# Register a new device (returns a credential)
 curl -X POST http://your-server:1738/v1/devices/register \
-  -H "Authorization: Bearer <operator-credential>" \
+  -H "Authorization: Bearer <opera...ial>" \
   -H "Content-Type: application/json" \
   -d '{"label":"laptop","platform":"linux","hostname":"mylaptop.local"}'
-
-# The server returns a device_id + credential.
-# Store them in ~/.config/mnemes/client.env on the device.
 ```
 
-### 7. Verify
+### 6. Verify
 
 ```bash
 # Health check
@@ -220,98 +248,9 @@ curl http://127.0.0.1:1738/v1/health
 
 # Search (requires auth)
 curl -X POST http://127.0.0.1:1738/v1/search/witnessed \
-  -H "Authorization: Bearer <device-credential>" \
+  -H "Authorization: Bearer <devic...ial>" \
   -H "Content-Type: application/json" \
   -d '{"query":"test","limit":5}'
-```
-
-### Embedding provider notes
-
-| Provider | Setup | Speed | Best for |
-|---|---|---|---|
-| **Candle** (default) | None — downloads nomic-embed-text-v1.5 from HuggingFace on first run (~274MB, cached) | ~138ms/embed on CPU | Laptops, servers without GPU |
-| **Ollama** | `ollama pull nomic-embed-text` then set `MNEMES_EMBEDDER=ollama` | ~33ms/embed with GPU | GPU servers, shared pools with low latency |
-
-If the server runs in a sandboxed environment (systemd `ProtectSystem=strict`), add `~/.cache/huggingface` to `ReadWritePaths` so Candle can cache the model, or set `HF_HUB_OFFLINE=1` after pre-downloading.
-
----
-
-## Use as a library
-
-```rust
-use mnemes::{MnemesStore, Device, DeviceId, Actor, ActorKind, ActorId};
-use semantic_memory::{MemoryConfig, EmbeddingConfig, MockEmbedder};
-use tempfile::TempDir;
-
-#[tokio::main]
-async fn main() {
-    let dir = TempDir::new().unwrap();
-    let config = MemoryConfig {
-        base_dir: dir.path().to_path_buf(),
-        embedding: EmbeddingConfig { dimensions: 768, ..Default::default() },
-        ..Default::default()
-    };
-
-    let store = MnemesStore::open_with_embedder(
-        dir.path().to_path_buf(),
-        config,
-        Box::new(MockEmbedder::new(768)),
-    ).unwrap();
-
-    // Register a device
-    let dev_id = DeviceId::new();
-    store.register_device(Device::new(dev_id.clone(), "laptop", "linux", "nobara-pc"))
-        .await.unwrap();
-
-    // Register an actor
-    let actor_id = ActorId::new();
-    store.register_actor(Actor::new(actor_id, dev_id.clone(), ActorKind::Hermes))
-        .await.unwrap();
-
-    // Access the underlying semantic-memory store for this device
-    let memory = store.device_memory(&dev_id).await.unwrap();
-    memory.add_fact("general", "Rust was first released in 2015", None, None)
-        .await.unwrap();
-
-    // Routed search across all eligible device shards
-    let response = store.routed_search(
-        "rust release history",
-        10,
-        &dev_id,
-        None, None, // no namespace/source_type filters
-        None,       // no shard budget (use default)
-        false,      // not exhaustive
-    ).await.unwrap();
-
-    for result in &response.results {
-        println!("[{}] score={:.4} {}", result.device_id, result.result.score, result.result.content);
-    }
-}
-```
-
-### Run the server
-
-```bash
-# Start the loopback HTTP server (default port 3000)
-mnemes-server
-
-# Custom port and data directory
-mnemes-server 1738 ~/.local/share/mnemes
-
-# Via environment variable
-MNEMES_DATA_DIR=/var/lib/mnemes mnemes-server 1738
-```
-
-### Bootstrap a new store
-
-```bash
-# Offline admin bootstrap (generates device credential)
-mnemes-admin bootstrap ~/.local/share/mnemes laptop linux myhostname
-```
-
-Output:
-```json
-{"device_id":"...","actor_id":"...","credential":"...","profile":"operator","created_at":"..."}
 ```
 
 ---
@@ -419,7 +358,7 @@ println!("Searched {} of {} eligible shards",
 
 ---
 
-## API surface
+## API Surface
 
 ### HTTP REST (loopback only, `127.0.0.1`)
 
@@ -469,6 +408,59 @@ mnemes-admin bootstrap <DATA_DIR> <LABEL> <PLATFORM> <HOSTNAME> [ACTOR_KIND]
 
 ---
 
+## Use as a library
+
+```rust
+use mnemes::{MnemesStore, Device, DeviceId, Actor, ActorKind, ActorId};
+use semantic_memory::{MemoryConfig, EmbeddingConfig, MockEmbedder};
+use tempfile::TempDir;
+
+#[tokio::main]
+async fn main() {
+    let dir = TempDir::new().unwrap();
+    let config = MemoryConfig {
+        base_dir: dir.path().to_path_buf(),
+        embedding: EmbeddingConfig { dimensions: 768, ..Default::default() },
+        ..Default::default()
+    };
+
+    let store = MnemesStore::open_with_embedder(
+        dir.path().to_path_buf(),
+        config,
+        Box::new(MockEmbedder::new(768)),
+    ).unwrap();
+
+    // Register a device
+    let dev_id = DeviceId::new();
+    store.register_device(Device::new(dev_id.clone(), "laptop", "linux", "nobara-pc"))
+        .await.unwrap();
+
+    // Register an actor
+    let actor_id = ActorId::new();
+    store.register_actor(Actor::new(actor_id, dev_id.clone(), ActorKind::Hermes))
+        .await.unwrap();
+
+    // Access the underlying semantic-memory store for this device
+    let memory = store.device_memory(&dev_id).await.unwrap();
+    memory.add_fact("general", "Rust was first released in 2015", None, None)
+        .await.unwrap();
+
+    // Routed search across all eligible device shards
+    let response = store.routed_search(
+        "rust release history",
+        10,
+        &dev_id,
+        None, None, // no namespace/source_type filters
+        None,       // no shard budget (use default)
+        false,      // not exhaustive
+    ).await.unwrap();
+
+    for result in &response.results {
+        println!("[{}] score={:.4} {}", result.device_id, result.result.score, result.result.content);
+    }
+}
+```
+
 ## Operation envelopes
 
 Every state-changing action is wrapped in an idempotent operation envelope:
@@ -478,153 +470,366 @@ use mnemes::{OperationEnvelope, OperationId, OperationKind};
 
 let envelope = OperationEnvelope {
     operation_id: OperationId::new(),
-    idempotency_key: "import-rust-facts-2026-07-20".to_string(),
-    requesting_device_id: laptop_id.clone(),
-    requesting_actor_id: hermes_actor.clone(),
-    recording_device_id: laptop_id.clone(),
-    recording_server_id: server_id.clone(),
-    operation_kind: OperationKind::Assert,
-    target_kind: "fact".to_string(),
-    target_id: "rust-release-2015".to_string(),
-    content_digest: "sha256:...".to_string(),
-    observed_at: Some("2026-07-20T10:00:00Z".to_string()),
-    valid_time: Some("2015-05-15T00:00:00Z".to_string()),
-    recorded_at: String::new(), // server stamps this
-    receipt_id: None,           // server assigns this
+    requesting_device_id: dev_id.clone(),
+    requesting_actor_id: actor_id.clone(),
+    recording_device_id: server_device_id.clone(),
+    recording_server_id: server_id,
+    operation_kind: OperationKind::AddFact,
+    target_kind: "fact".into(),
+    target_id: "namespace:general:fact:123".into(),
+    content_digest: Some(sha256_hex(&content)),
+    observed_at: Some(Utc::now()),
+    valid_time: Some(Utc::now()),
+    idempotency_key: format!("add-fact-{}-{}", dev_id, timestamp),
 };
 
-store.submit_operation(envelope).await.unwrap();
+// Submit to server — server assigns operation_id and recorded_at
+let receipt = client.submit_operation(&envelope).await?;
 ```
 
-Supported operation kinds: `Observe`, `Assert`, `Supersede`, `Revoke`, `Redact`, `Adjudicate`.
+Key properties:
+- **Idempotent**: Same `idempotency_key` always returns the original operation
+- **Server-timestamped**: `recorded_at` is never trusted from clients
+- **Content-verified**: `content_digest` is SHA-256, verified by server
+- **Bitemporal**: `valid_time` (when observed) + `recorded_at` (when recorded)
 
 ---
 
-## Replication (in development)
+## The Semantic-Memory Engine
 
-The target replication protocol uses **snapshot bootstrap** plus a **typed, signed semantic mutation journal** — not live SQLite/WAL file synchronization. Each mutation envelope is signed with Ed25519 and includes a canonical content digest:
+Mnemes delegates all memory operations — storage, indexing, retrieval, graph traversal, trust verification — to `semantic-memory`. This section documents the engine's capabilities as exposed through Mnemes.
 
-```rust
-use mnemes::replication::{MemoryMutationEnvelopeV1, SIGNATURE_DOMAIN_TAG};
+### Store Architecture
 
-// Domain-separated signing prevents cross-protocol signature reuse
-// SIGNATURE_DOMAIN_TAG = b"mnemes/mutation-envelope/signature/v1\0"
-// DIGEST_DOMAIN_TAG     = b"mnemes/mutation-envelope/v1\0"
+```
+┌──────────────────────────────────────────────────────┐
+│                 SEMANTIC-MEMORY ENGINE                │
+│                                                       │
+│  ┌─────────┐  ┌──────────┐  ┌────────────────────┐  │
+│  │ SQLite  │  │  HNSW    │  │  Knowledge Graph   │  │
+│  │ + FTS5  │  │  Vector  │  │  Typed edges       │  │
+│  │         │  │  768-dim │  │  Communities        │  │
+│  └────┬────┘  └────┬─────┘  │  Factor graphs      │  │
+│       │            │        └─────────┬──────────┘  │
+│       └────────────┼──────────────────┘              │
+│                    │                                 │
+│  ┌─────────────────▼──────────────────────────────┐ │
+│  │            Trust Layer                          │ │
+│  │  Claims → Evidence → Judgments → Receipts      │ │
+│  │  Hash-chained ledger · Bitemporal versioning    │ │
+│  └────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────┘
 ```
 
-See:
-- [docs/DEVICE_OWNED_REPLICATED_MEMORY.md](docs/DEVICE_OWNED_REPLICATED_MEMORY.md) — target architecture
-- [docs/DEVICE_OWNED_REPLICATION_IMPLEMENTATION_PLAN.md](docs/DEVICE_OWNED_REPLICATION_IMPLEMENTATION_PLAN.md) — implementation plan
-- [docs/PHASE4_OPERATIONS.md](docs/PHASE4_OPERATIONS.md) — production deployment guide
-- [docs/PHASE5_MIGRATION.md](docs/PHASE5_MIGRATION.md) — migration guide
+### Tool Surface (60+ MCP tools)
+
+The `semantic-memory-mcp` server exposes tools organized into functional groups. All tools share a common response envelope: `{ok, status, data, error, error_code}`.
+
+**Search & Retrieval:** `sm_search` (hybrid BM25+vector+RRF), `sm_search_witnessed` (bypass-cache, durable receipt), `sm_search_with_routing` (adaptive with factor graph), `sm_search_proof_debt` (trust-index gated), `sm_search_as_of` (bitemporal), `sm_search_conversations`, `sm_route_query`, `sm_get_search_receipt`, `sm_replay_search`, `sm_benchmark_trust`, `sm_get_routing_policy`
+
+**Knowledge Graph:** `sm_add_graph_edge` (Semantic/Temporal/Causal/Entity), `sm_list_graph_edges`, `sm_invalidate_graph_edge`, `sm_get_fact_neighbors`, `sm_graph_path` (BFS), `sm_community` (Leiden-inspired), `sm_topology` (Betti numbers), `sm_factor_graph` (belief propagation), `sm_decoder_analyze`, `sm_detect_contradictions`, `sm_subgraph_prune`
+
+**Memory Management:** `sm_add_fact`, `sm_get_fact`, `sm_update_fact`, `sm_delete_fact`, `sm_supersede_fact`, `sm_consolidate_facts`, `sm_list_facts`, `sm_list_namespaces`, `sm_set_provenance`, `sm_ingest_document`
+
+**Lifecycle:** `sm_run_lifecycle`, `sm_reconcile`, `sm_vacuum`, `sm_reembed_all`, `sm_embeddings_are_dirty`, `sm_stats`, `sm_compact_claim_ledger`
+
+**Trust & Governance:** `sm_create_claim`, `sm_add_evidence`, `sm_judge_support`, `sm_verify_claim`, `sm_decide_assertion_authority`, `sm_decide_action_authority`, `sm_query_claim_versions`, `sm_query_evidence_refs`
+
+**Utilities:** `sm_parse_json`, `sm_parse_choice`, `sm_parse_number`, `sm_parse_string_list`, `sm_repair_json`, `sm_strip_think_tags`, `sm_record_outcome`
+
+## Retrieval Pipeline
+
+```
+Query → Query Profiler (RL routing) → Parallel: [BM25(FTS5) | Vector(HNSW) | Graph Exp]
+                                         → RRF Fusion → Post-Processing → Results + Receipt
+```
+
+### Retrieval Stages
+
+| Stage | Engine | Est. Latency | RL Weight |
+|-------|--------|-------------|-----------|
+| **BM25 Coarse** | SQLite FTS5 | <1ms | 0.98 |
+| **Vector Medium** | HNSW (768-dim) | 5-20ms | 0.98 |
+| **Graph Expansion** | SQLite graph edges | 2-10ms | 1.00 |
+| **Rerank Fine** | Exact f32 comparison | 1-5ms/result | 0.48 |
+| **Decoder** | Belief propagation | 10-50ms | 0.20 |
+| **Discord** | Second-order graph | 5-20ms | 0.20 |
+
+The RL routing policy is trained on feedback via `sm_record_outcome` and dynamically activates retrieval stages based on query characteristics.
+
+### Search Variants
+
+| Variant | Tool | Use Case |
+|---------|------|----------|
+| **Standard** | `sm_search` | Everyday hybrid retrieval |
+| **Witnessed** | `sm_search_witnessed` | Auditable, replayable, cache-bypassed |
+| **Adaptive** | `sm_search_with_routing` | Query-optimized with optional factor graph |
+| **Proof-Debt** | `sm_search_proof_debt` | Trust-index gated, budgeted verification |
+| **Bitemporal** | `sm_search_as_of` | "What did we know as of date X?" |
+| **Conversation** | `sm_search_conversations` | Search past dialog history |
+
+## Knowledge Graph
+
+### Four Edge Types
+
+| Type | Key Field | Semantics |
+|------|-----------|-----------|
+| **Semantic** | `cosine_similarity` (0.0-1.0) | Semantic relationship |
+| **Temporal** | `delta_secs` (u64) | Fact A preceded Fact B |
+| **Causal** | `confidence` (0.0-1.0) + evidence | Fact A caused Fact B |
+| **Entity** | `relation` (string) | Named relationship |
+
+### Graph Operations
+
+| Operation | Tool | Description |
+|-----------|------|-------------|
+| **Community Detection** | `sm_community` | Leiden-inspired, configurable resolution, contradiction scanning |
+| **Topology Analysis** | `sm_topology` | Betti numbers (β₀ components, β₁ cycles), structural voids |
+| **Shortest Path** | `sm_graph_path` | BFS with configurable max_depth |
+| **Factor Graph** | `sm_factor_graph` | Belief propagation over all edge types |
+| **Subgraph Pruning** | `sm_subgraph_prune` | Access-frequency-based, dry-run default |
+| **Contradiction Detection** | `sm_detect_contradictions` | Content-based: numeric, value, negation, antonym |
+
+Edges are **never deleted** — they are invalidated with `sm_invalidate_graph_edge(edge_id, reason)`, preserving audit trails.
+
+## Trust & Provenance
+
+### Claim State Machine
+
+```
+draft → supported → contested → retracted
+```
+
+### Verification by Risk Class
+
+| Risk Class | Requirements | Disposition |
+|------------|-------------|-------------|
+| **Low** | Cheap integrity checks | Auto-promote |
+| **Medium** | + metadata validation | Promote with caveats |
+| **High** | Falsification attempt required | Promote only if survives refutation |
+| **Critical** | Replay + falsification | Quarantine if either fails |
+
+### Governed Access
+
+The system implements **purpose-isolated authority** — recall, assertion, action, export, and replay are never cross-purpose reusable. Delegation/elevation leases are scoped by namespace, purpose, audience, and expiration.
+
+### Audit Trail
+
+| Artifact | What It Proves |
+|----------|---------------|
+| **Claim Ledger** | Hash-chained, append-only history of all claims |
+| **Search Receipts** | What was returned for a query at a point in time |
+| **Replay Verification** | Results are reproducible (or not) |
+| **Bitemporal Queries** | Who asserted what, when, with what valid-time |
+| **Evidence Refs** | Trace evidence back to sources |
+
+## Data Model
+
+### Core Entities
+
+```
+Facts (UUID, content, namespace, source, memory_kind, sensitivity,
+      embedding[768], valid_time, transaction_time, created_at, updated_at)
+
+Documents → Chunks (auto-split, independently embedded and indexed)
+
+Messages → Sessions (conversation history searchable)
+
+Graph Edges (source→target, typed, weighted, invalidatable)
+
+Claims → Evidence → Judgments (bitemporal, hash-chained)
+```
+
+### Memory Kinds
+
+| Kind | Persistence |
+|------|------------|
+| `durable_fact` | Permanent |
+| `preference` | Durable |
+| `project_state` | Durable |
+| `instruction_policy` | Durable |
+| `correction` | Durable |
+| `observation` | Durable |
+| `episode_summary` | Durable |
+| `skill_procedure` | Durable |
+| `ephemeral_inference` | **Transient** — requires `evidence_refs` to promote |
+
+### Sensitivity Classes
+
+| Class | Autocapture | Search | Export |
+|-------|------------|--------|--------|
+| `public` | ✓ | Unrestricted | ✓ |
+| `internal` (default) | ✓ | Namespace-scoped | With auth |
+| `confidential` | **Blocked** | Governed | Blocked |
+| `restricted` | **Blocked** | Governed | Blocked |
+
+### Supersede Pattern
+
+```
+Old Fact (stale) ──supersedes──→ New Fact (current)
+                                      │
+                                Auto-filtered from default search
+```
+
+Use `sm_supersede_fact` for knowledge evolution — the old fact is preserved for audit but excluded from default queries.
 
 ---
 
-## What Mnemes does NOT do
+## Memory Lifecycle
 
-- **Does not replace semantic-memory.** Devices that prefer local-only memory use `semantic-memory` directly.
-- **Does not duplicate claim-ledger trust authority.** Claim/evidence adjudication remains in [`claim-ledger`](https://github.com/RecursiveIntell/claim-ledger).
-- **Does not automatically trust model-extracted memories.** Observations must be explicitly asserted or adjudicated.
-- **Does not yet continuously replicate databases.** The researched target protocol is snapshot bootstrap plus signed mutation journal replay.
+### Curation Workflow
+
+```
+PHASE 1: AUDIT (read-only)
+  sm_stats → sm_list_facts → sm_community → sm_run_lifecycle → HEALTH REPORT
+
+── USER APPROVAL ──
+
+PHASE 2: RECONCILE
+  sm_supersede_fact (default) | sm_consolidate_facts |
+  sm_invalidate_graph_edge | sm_set_provenance
+```
+
+### Maintenance Operations
+
+| Operation | Tool | Frequency | Est. Cost |
+|-----------|------|-----------|-----------|
+| Syndrome Detection | `sm_run_lifecycle` | Weekly | Low |
+| FTS Rebuild | `sm_reconcile(RebuildFts)` | On corruption | Medium |
+| Vacuum | `sm_vacuum` | After large deletes | Medium |
+| Re-embed All | `sm_reembed_all` | After model change | High (~138ms/fact) |
+| Claim Compaction | `sm_compact_claim_ledger` | Auto at threshold | Low |
+
+### Guardrails
+
+1. **Append-only**: Facts evolve through supersession, not deletion
+2. **Artifact primacy**: Live repo/spec files outrank memory if they conflict
+3. **Batch changes**: Group related mutations with receipt reasons
+4. **Dry-run defaults**: Destructive operations preview before executing
 
 ---
 
-## Install as a systemd service
+## Performance & Scaling
 
-```bash
-# Copy the service file
-sudo cp ops/systemd/mnemes.service /etc/systemd/system/
+### Retrieval Performance
 
-# Edit the service file to set your data directory and user
-sudo vim /etc/systemd/system/mnemes.service
+| Operation | Latency | Notes |
+|-----------|---------|-------|
+| BM25 (FTS5) | <1ms | Sub-millisecond |
+| Vector (HNSW) | 5-20ms | 768-dim, approximate NN |
+| RRF Fusion | ~1ms | Rank merging |
+| Factor Graph BP | 10-50ms | Depends on edge count |
+| Witnessed Search | +2ms | Cache bypass + receipt |
 
-# Enable and start
-sudo systemctl daemon-reload
-sudo systemctl enable mnemes
-sudo systemctl start mnemes
+### Compression Backends
 
-# Check status
-sudo systemctl status mnemes
+| Backend | Technique | Trade-off |
+|---------|-----------|-----------|
+| **Standard** | Full f32 (3KB/fact) | Maximum recall |
+| **fib-quant** | Fibonacci quantization | 8-16× compression |
+| **turbo-quant** | Compressed-domain retrieval | Direct compressed search |
+| **proveKV** | Extreme compression + f32 rerank | Coarse→fine pipeline |
+
+### Scaling Characteristics
+
+| Scale | SQLite Viability | Concern |
+|-------|-----------------|---------|
+| 1K facts (~22MB) | ✓ Excellent | All operations sub-50ms |
+| 10K facts (~200MB) | ✓ Good | HNSW construction slower |
+| 100K facts (~2GB) | ⚠ Moderate | Single-writer bottleneck |
+| 1M+ facts | ⚠ Sharding needed | SQLite ceiling ~1-4GB |
+
+---
+
+## Security & Governance
+
+### Trust Boundaries
+
+```
+MCP stdio (local proc) → Tool Router (auth-less, local only)
+HTTP :1738             → Bearer Token Gate (all endpoints)
+                         → Governed Access Layer (purpose-isolated)
+                           → SQLite File (filesystem ACLs)
+```
+
+### Attack Surface
+
+| Surface | Risk | Mitigation |
+|---------|------|------------|
+| MCP stdio | Local process only | JSON-RPC parsing, no network exposure |
+| HTTP admin | Network-accessible | Bearer token on ALL endpoints |
+| SQLite file | Filesystem access | Unix permissions; sensitivity classes |
+| Ollama embeds | Local network call | Same-host deployment |
+| Fact injection | Text in LLM context | Sensitivity gates; governed recall |
+
+### Governance Framework
+
+```
+Delegator ──delegates──→ Delegatee
+                ├── Purposes: [recall, assertion, action, ...]
+                ├── Scope: {namespace, domain, repo_id, workspace_id}
+                ├── Audiences: [specific human/agent IDs]
+                └── Expires: ISO8601 timestamp
+```
+
+Authority is **purpose-isolated** — a delegatee authorized for `recall` cannot assert or act. Cross-purpose reuse is never permitted.
+
+---
+
+## Project Structure
+
+```
+mnemes/                          # This crate
+├── src/
+│   ├── bin/
+│   │   ├── mnemes-server.rs     # HTTP server binary
+│   │   └── mnemes-admin.rs      # Bootstrap/admin CLI
+│   ├── lib.rs                   # Library root
+│   ├── store.rs                 # MnemesStore: multi-device control plane
+│   ├── routing.rs               # Sparse shard routing
+│   ├── devices.rs               # Device registry + credentials
+│   ├── actors.rs                # Actor registry
+│   ├── operations.rs            # Idempotent operation envelopes
+│   └── replication.rs           # Ed25519-signed journal replay
+├── scripts/
+│   ├── mneme-codex-task.sh      # Codex CI task runner
+│   ├── mneme-mcp-proxy.py       # MCP proxy for Hermes
+│   └── setup-mnemes-tailscale.sh # Tailscale integration
+├── ops/systemd/                 # systemd unit files
+├── docs/                        # Architecture diagrams + specs
+├── tests/                       # Integration tests
+└── Cargo.toml
+```
+
+### Dependent crates (workspace members)
+
+```
+Libraries/                       # Canonical workspace
+├── semantic-memory/             # Core library (v0.5.14)
+├── semantic-memory-mcp/         # MCP server binary (v0.5.6)
+├── semantic-memory-forge/       # Build/dev tooling
+└── agent-graph-mcp/             # Graph-orchestrated LLM workflows
 ```
 
 ---
 
-## Configuration
+## Related Projects
 
-| Environment variable | Default | Description |
-| --- | --- | --- |
-| `MNEMES_DATA_DIR` | `./data/mnemes` | Base directory for `pooled.db` and shard databases |
-| `POOLED_MEMORY_DATA_DIR` | (legacy alias) | Same as `MNEMES_DATA_DIR` — backward compat |
-
-Server defaults:
-- **Port:** 3000 (configurable via CLI arg)
-- **Bind:** `127.0.0.1` (loopback only — never exposed to the network)
-- **Shard cache:** 4 shards (configurable via `open_with_embedder_and_cache_capacity`)
-
----
-
-## Development
-
-```bash
-# Clone
-git clone https://github.com/RecursiveIntell/mnemes.git
-cd mnemes
-
-# Check
-cargo check
-
-# Test (14 integration tests)
-cargo test
-
-# Run server locally
-cargo run --bin mnemes-server -- 3000 ./data/mnemes
-
-# Bootstrap a test store
-cargo run --bin mnemes-admin -- ./data/mnemes test-device linux localhost
-```
-
-### Test suite
-
-| Test file | Coverage |
-| --- | --- |
-| `tests/device_shards.rs` | Shard routing, ranking, cache, integrity, fallback, receipt verification |
-| `tests/provenance_edges.rs` | Provenance edge CRUD, bitemporal queries, lineage traversal |
-| `tests/bitemporal_lineage.rs` | Valid-time and recorded-time as-of queries |
-| `tests/server.rs` | HTTP server endpoints, auth, device/actor registration |
-| `tests/admin_cli.rs` | Admin bootstrap CLI |
-| `tests/replication_protocol.rs` | Mutation envelope signing, verification, replay |
-| `tests/replication_sync.rs` | Sync endpoint, snapshot bootstrap |
-
----
-
-## Contract facts
-
-| Property | Value |
-| --- | --- |
-| Crate name | `mnemes` |
-| Version | `0.1.0` |
-| Minimum Rust | `1.75` |
-| License | Apache-2.0 |
-| Default feature | `server` (axum HTTP + MCP) |
-| Pooled schema generation | `1` |
-| Storage | SQLite (rusqlite bundled) |
-| Vector backend | usearch 2.25 (via semantic-memory) |
-| Embedding | Candle in-process or Ollama (via semantic-memory) |
-| Auth | Ed25519 device credentials + HMAC receipt signing |
-| Server bind | `127.0.0.1` only (loopback) |
+| Project | Description |
+|---------|-------------|
+| [`semantic-memory`](https://crates.io/crates/semantic-memory) | Core engine: SQLite store, HNSW, FTS5, knowledge graph, trust ledger |
+| [`semantic-memory-mcp`](https://crates.io/crates/semantic-memory-mcp) | MCP server exposing 60+ tools to AI agents |
+| [`agent-graph-mcp`](https://github.com/RecursiveIntell/Libraries) | Graph-orchestrated LLM workflows |
+| [`agent-memory-kits`](https://github.com/RecursiveIntell/agent-memory-kits) | Hermes/Claude Code skill kits for memory operations |
 
 ---
 
 ## License
 
-Apache-2.0 — see [LICENSE](LICENSE).
+Apache-2.0
 
 ---
 
-<div align="center">
-
-**Built by [RecursiveIntell](https://github.com/RecursiveIntell)** — local-first, operator-grade systems.
-
-[semantic-memory](https://github.com/RecursiveIntell/semantic-memory) · [semantic-memory-mcp](https://github.com/RecursiveIntell/semantic-memory-mcp) · [claim-ledger](https://github.com/RecursiveIntell/claim-ledger) · [turbo-quant](https://github.com/RecursiveIntell/turbo-quant)
-
-</div>
+<p align="center">
+  <em>Built with Rust · SQLite · HNSW · MCP · Ed25519</em>
+</p>
