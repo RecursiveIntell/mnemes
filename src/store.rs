@@ -101,6 +101,15 @@ impl semantic_memory::Embedder for SharedEmbedder {
     }
 }
 
+/// Result of accepting one source fact into a device-owned shard.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FactSyncOutcome {
+    /// The server re-embedded and persisted a new local fact.
+    Synced { server_fact_id: String },
+    /// This source fact was already accepted for this device.
+    Skipped,
+}
+
 struct ShardStoreCache {
     capacity: usize,
     stores: HashMap<String, Arc<semantic_memory::MemoryStore>>,
@@ -2083,6 +2092,97 @@ impl MnemesStore {
             });
         }
         Ok(statuses)
+    }
+
+    /// Accept a source fact into the authenticated device's shard.
+    ///
+    /// The source ID is stored only in pooled control-plane state for durable
+    /// idempotency. Content follows semantic-memory's normal `add_fact` path,
+    /// so the server owns embedding generation and all schema-specific writes.
+    pub async fn sync_fact_to_shard(
+        &self,
+        device_id: &DeviceId,
+        source_fact_id: &str,
+        namespace: &str,
+        content: &str,
+        source: Option<&str>,
+        metadata: Option<Value>,
+    ) -> Result<FactSyncOutcome, MnemesError> {
+        let device = self
+            .get_device(device_id)
+            .await?
+            .ok_or_else(|| MnemesError::DeviceNotFound(device_id.to_string()))?;
+        if device.status != DeviceStatus::Active {
+            return Err(MnemesError::DeviceNotActive(device_id.to_string()));
+        }
+
+        {
+            let conn = self.pool_conn.lock().await;
+            conn.execute_batch(
+                "CREATE TABLE IF NOT EXISTS synced_facts (
+                    source_fact_id TEXT NOT NULL,
+                    device_id TEXT NOT NULL,
+                    server_fact_id TEXT NOT NULL,
+                    synced_at TEXT NOT NULL,
+                    PRIMARY KEY (source_fact_id, device_id)
+                )",
+            )?;
+            let already: bool = conn.query_row(
+                "SELECT EXISTS(SELECT 1 FROM synced_facts
+                 WHERE source_fact_id = ?1 AND device_id = ?2)",
+                params![source_fact_id, device_id.as_str()],
+                |row| row.get(0),
+            )?;
+            if already {
+                return Ok(FactSyncOutcome::Skipped);
+            }
+        }
+
+        // Reconcile a pre-daemon migration by exact namespace+content match.
+        // Existing shards predate source-ID tracking, so this maps matching
+        // facts without blindly duplicating the already-migrated baseline.
+        let shard_db = self.device_shard_path(device_id).join("memory.db");
+        let existing_fact_id = if shard_db.exists() {
+            let conn = rusqlite::Connection::open_with_flags(
+                &shard_db,
+                rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY
+                    | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
+            )?;
+            conn.query_row(
+                "SELECT id FROM facts WHERE namespace = ?1 AND content = ?2 LIMIT 1",
+                params![namespace, content],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?
+        } else {
+            None
+        };
+
+        let (server_fact_id, outcome) = if let Some(existing) = existing_fact_id {
+            (existing, FactSyncOutcome::Skipped)
+        } else {
+            // Re-embedding is done entirely at the authority's configured provider.
+            let shard = self.device_memory(device_id).await?;
+            let id = shard.add_fact(namespace, content, source, metadata).await?;
+            (id.clone(), FactSyncOutcome::Synced { server_fact_id: id })
+        };
+
+        // Commit the source-ID acknowledgement only after the fact is durable.
+        // If this acknowledgement write fails, a retry is safer than silently
+        // advancing the client watermark.
+        let conn = self.pool_conn.lock().await;
+        conn.execute(
+            "INSERT INTO synced_facts (source_fact_id, device_id, server_fact_id, synced_at)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![
+                source_fact_id,
+                device_id.as_str(),
+                &server_fact_id,
+                chrono::Utc::now().to_rfc3339(),
+            ],
+        )?;
+
+        Ok(outcome)
     }
 
     /// Run `PRAGMA quick_check` against the mnemes SQLite database.

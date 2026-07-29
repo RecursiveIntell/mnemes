@@ -7,6 +7,7 @@
 use crate::error::MnemesError;
 use crate::replica::ReplicaApplier;
 use crate::replication::TrustedKeyRegistry;
+use crate::sync::ReplayDispatch;
 
 /// Request body for a sync batch push.
 #[derive(Debug, serde::Deserialize)]
@@ -44,7 +45,7 @@ pub fn process_sync_request(
     request: SyncRequest,
     registry: &TrustedKeyRegistry,
     replica_base_dir: &std::path::Path,
-    dispatch_fn: &dyn Fn(&rusqlite::Connection, &str, &[u8]) -> Result<(), MnemesError>,
+    dispatch_fn: &ReplayDispatch,
 ) -> Result<SyncResponse, MnemesError> {
     let replica_path = replica_base_dir.join(format!("{}.db", request.store_id));
     let applier = ReplicaApplier::new(&replica_path, &request.home_device_id, &request.store_id);

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -uo pipefail
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
-client=${MNEMES_CLIENT:-$script_dir/mnemes-client.py}
+client=${MNEMES_CLIENT:-$script_dir/mneme-client.py}
 receipt_dir=${MNEMES_RECEIPT_DIR:-$HOME/.local/state/mnemes/codex-receipts}
 strict=${MNEMES_STRICT:-1}
 dry=0

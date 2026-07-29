@@ -3,16 +3,20 @@
 # mnemes — install or update
 #
 # Usage:
-#   ./install.sh              # install from crates.io
-#   ./install.sh --from-source # build and install from local source
-#   ./install.sh --check       # check if installed and up to date
-#   ./install.sh --uninstall   # remove mnemes binaries
+#   ./install.sh                         # install from crates.io
+#   ./install.sh --from-source           # build and install from local source
+#   ./install.sh --with-tailscale        # install, then guided private tailnet access
+#   ./install.sh --tailscale-only        # configure tailnet access for an existing install
+#   ./install.sh --check                 # check if installed and up to date
+#   ./install.sh --uninstall             # remove mnemes binaries
 #
 set -euo pipefail
 
 CRATE_NAME="mnemes"
-CRATE_VERSION="0.1.0"
+CRATE_VERSION="0.1.1"
 BINS=("mnemes-server" "mnemes-admin")
+tailscale_requested=0
+tailscale_only=0
 
 RED='\033[0;31m'
 GREEN='\033[0;32m'
@@ -90,7 +94,10 @@ do_install_crate() {
         if [[ "$ver" == "$CRATE_VERSION" ]]; then
             ok "Already at target version v${CRATE_VERSION}"
             read -rp "Reinstall anyway? [y/N] " confirm
-            [[ "$confirm" =~ ^[Yy]$ ]] || exit 0
+            if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+                info "Keeping the existing installation"
+                return 0
+            fi
         else
             info "Updating to v${CRATE_VERSION}..."
         fi
@@ -146,7 +153,11 @@ print_postinstall() {
     echo "  3. Check health:"
     echo "     curl http://127.0.0.1:3000/v1/health"
     echo ""
-    echo "  4. As a library dependency:"
+    echo "  4. Optional private anywhere-access:"
+    echo "     ./install.sh --tailscale-only"
+    echo "     # Keeps Mnemes on loopback and uses Tailscale Serve over HTTPS"
+    echo ""
+    echo "  5. As a library dependency:"
     echo "     # Cargo.toml"
     echo "     [dependencies]"
     echo "     mnemes = \"${CRATE_VERSION}\""
@@ -155,17 +166,51 @@ print_postinstall() {
     info "Repo: https://github.com/RecursiveIntell/mnemes"
 }
 
+setup_tailscale_if_requested() {
+    (( tailscale_requested )) || return 0
+    local script_dir
+    script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+    [[ -x "$script_dir/scripts/setup-mnemes-tailscale.sh" ]] || {
+        err "Tailscale setup helper is missing or not executable"
+        exit 1
+    }
+    header "Private Tailscale access"
+    info "Mnemes stays bound to loopback; Tailscale Serve provides tailnet-only HTTPS."
+    "$script_dir/scripts/setup-mnemes-tailscale.sh" --apply --install-missing
+}
+
 # --- Main ---
 
 main() {
-    local action="${1:-install}"
+    local action="install"
+    for arg in "$@"; do
+        case "$arg" in
+            --with-tailscale) tailscale_requested=1 ;;
+            --tailscale-only) tailscale_requested=1; tailscale_only=1 ;;
+            --from-source|from-source) action="from-source" ;;
+            --check|check) action="check" ;;
+            --uninstall|uninstall) action="uninstall" ;;
+            install|--install) action="install" ;;
+            --help|-h|help) action="help" ;;
+            *) err "Unknown action: $arg"; echo "Run ./install.sh --help for usage"; exit 1 ;;
+        esac
+    done
+
+    if (( tailscale_only )); then
+        local script_dir
+        script_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+        "$script_dir/scripts/setup-mnemes-tailscale.sh" --apply --install-missing
+        return 0
+    fi
 
     case "$action" in
         install|--install)
             do_install_crate
+            setup_tailscale_if_requested
             ;;
         --from-source|from-source)
             do_install_source
+            setup_tailscale_if_requested
             ;;
         --check|check)
             do_check
@@ -177,18 +222,16 @@ main() {
             echo "mnemes install script"
             echo ""
             echo "Usage:"
-            echo "  ./install.sh               Install from crates.io (default)"
-            echo "  ./install.sh --from-source  Build and install from local source"
-            echo "  ./install.sh --check        Check if installed and up to date"
-            echo "  ./install.sh --uninstall    Remove mnemes binaries"
+            echo "  ./install.sh                         Install from crates.io (default)"
+            echo "  ./install.sh --from-source           Build and install from local source"
+            echo "  ./install.sh --with-tailscale        Install, then configure private tailnet access"
+            echo "  ./install.sh --tailscale-only        Configure tailnet access for an existing install"
+            echo "  ./install.sh --check                 Check if installed and up to date"
+            echo "  ./install.sh --uninstall             Remove mnemes binaries"
             echo ""
             echo "Requirements:"
             echo "  Rust 1.75+ (install via https://rustup.rs)"
-            ;;
-        *)
-            err "Unknown action: $action"
-            echo "Run ./install.sh --help for usage"
-            exit 1
+            echo "  Tailscale is optional; --with-tailscale offers guided installation and auth"
             ;;
     esac
 }

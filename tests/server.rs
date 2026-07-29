@@ -1005,3 +1005,45 @@ fn server_data_directory_matches_admin_store_layout() {
     drop(reopened);
     assert!(!temp.path().join("pooled.db").join("pooled.db").exists());
 }
+
+#[tokio::test]
+async fn legacy_sync_routes_fail_closed_before_auth_or_body_processing() {
+    let server = spawn_server().await;
+    let client = Client::new();
+
+    for (route, body) in [
+        (
+            "/v1/sync",
+            json!({
+                "home_device_id": "caller-controlled",
+                "store_id": "../../escape",
+                "start_sequence": 1,
+                "entries": [{
+                    "sequence": 1,
+                    "operation_kind": "raw-sql",
+                    "payload_hex": "44524f50205441424c452066616374733b"
+                }]
+            }),
+        ),
+        (
+            "/v1/sync/facts",
+            json!({
+                "facts": [{
+                    "fact_id": "caller-controlled",
+                    "namespace": "sync-test",
+                    "content": "must not be admitted"
+                }]
+            }),
+        ),
+    ] {
+        let response = client
+            .post(format!("{}{route}", server.base_url))
+            .json(&body)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::NOT_IMPLEMENTED, "{route}");
+        let response_body: Value = response.json().await.unwrap();
+        assert_eq!(response_body["error"], "SYNC_DISABLED", "{route}");
+    }
+}

@@ -61,8 +61,10 @@ impl ReplicaStore {
             MnemesError::Replication(format!("cannot set query_only on replica: {e}"))
         })?;
 
-        let mut config = MemoryConfig::default();
-        config.base_dir = db_path.parent().unwrap_or(db_path).to_path_buf();
+        let config = MemoryConfig {
+            base_dir: db_path.parent().unwrap_or(db_path).to_path_buf(),
+            ..Default::default()
+        };
 
         // Limitation: MemoryStore currently owns its pool and has no public
         // constructor accepting this pre-opened read-only connection. Keep the

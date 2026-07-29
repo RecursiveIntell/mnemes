@@ -62,8 +62,8 @@ Mnemes is the **product surface** of a three-crate stack:
 
 | Crate | Version | Role |
 |-------|---------|------|
-| [`semantic-memory`](https://crates.io/crates/semantic-memory) | v0.6.0 | Core library: SQLite store, HNSW vectors, FTS5 search, knowledge graph, trust ledger |
-| [`semantic-memory-mcp`](https://crates.io/crates/semantic-memory-mcp) | v0.5.6 | MCP server: exposes 60+ tools to AI agents via stdio JSON-RPC |
+| [`semantic-memory`](https://crates.io/crates/semantic-memory) | v0.5.14 | Core library: SQLite store, HNSW vectors, FTS5 search, knowledge graph, trust ledger |
+| [`semantic-memory-mcp`](https://crates.io/crates/semantic-memory-mcp) | v0.5.6 | MCP server: runtime-profiled tools for AI agents via stdio JSON-RPC |
 | **`mnemes`** (this crate) | v0.1.1 | Multi-device control plane: identity, routing, replication, pooled memory |
 
 ## How it works
@@ -113,10 +113,10 @@ cargo run --bin mnemes-server
 
 `EmbeddingConfig` remains the compatibility contract for model, dimensions, batch size, and timeout. A provider that returns a different dimension is rejected; mnemes does not silently mix embedding spaces.
 
-| Provider | Setup | Speed | Best for |
-|---|---|---|---|
-| **Candle** (default) | None — downloads nomic-embed-text-v1.5 from HuggingFace on first run (~274MB, cached) | ~138ms/embed on CPU | Laptops, servers without GPU |
-| **Ollama** | `ollama pull nomic-embed-text` then set `MNEMES_EMBEDDER=ollama` | ~33ms/embed with GPU | GPU servers, shared pools with low latency |
+| Provider | Setup | Best for |
+|---|---|---|
+| **Candle** (default) | None — downloads nomic-embed-text-v1.5 from HuggingFace on first run (cached afterward) | Laptops and servers without a separate embedding service |
+| **Ollama** | `ollama pull nomic-embed-text` then set `MNEMES_EMBEDDER=ollama` | GPU servers or deployments with an existing compatible embedding service |
 
 If the server runs in a sandboxed environment (systemd `ProtectSystem=strict`), add `~/.cache/huggingface` to `ReadWritePaths` so Candle can cache the model, or set `HF_HUB_OFFLINE=1` after pre-downloading.
 
@@ -521,7 +521,7 @@ Mnemes delegates all memory operations — storage, indexing, retrieval, graph t
 └──────────────────────────────────────────────────────┘
 ```
 
-### Tool Surface (60+ MCP tools)
+### Tool Surface
 
 The `semantic-memory-mcp` server exposes tools organized into functional groups. All tools share a common response envelope: `{ok, status, data, error, error_code}`.
 
@@ -546,14 +546,14 @@ Query → Query Profiler (RL routing) → Parallel: [BM25(FTS5) | Vector(HNSW) |
 
 ### Retrieval Stages
 
-| Stage | Engine | Est. Latency | RL Weight |
-|-------|--------|-------------|-----------|
-| **BM25 Coarse** | SQLite FTS5 | <1ms | 0.98 |
-| **Vector Medium** | HNSW (768-dim) | 5-20ms | 0.98 |
-| **Graph Expansion** | SQLite graph edges | 2-10ms | 1.00 |
-| **Rerank Fine** | Exact f32 comparison | 1-5ms/result | 0.48 |
-| **Decoder** | Belief propagation | 10-50ms | 0.20 |
-| **Discord** | Second-order graph | 5-20ms | 0.20 |
+| Stage | Role | Activation boundary |
+|-------|------|---------------------|
+| **BM25 Coarse** | SQLite FTS5 lexical candidates | Baseline hybrid retrieval |
+| **Vector Medium** | Vector candidates | Selected backend and embedding compatibility |
+| **Graph Expansion** | Graph-neighbor analysis | Explicit graph/routing path |
+| **Rerank Fine** | Authoritative `f32` comparison | Exact-rerank policy |
+| **Decoder** | Contradiction analysis | Decoder feature and explicit use |
+| **Discord** | Second-order graph retrieval | Discord feature and explicit use |
 
 The RL routing policy is trained on feedback via `sm_record_outcome` and dynamically activates retrieval stages based on query characteristics.
 
@@ -697,7 +697,7 @@ PHASE 2: RECONCILE
 | Syndrome Detection | `sm_run_lifecycle` | Weekly | Low |
 | FTS Rebuild | `sm_reconcile(RebuildFts)` | On corruption | Medium |
 | Vacuum | `sm_vacuum` | After large deletes | Medium |
-| Re-embed All | `sm_reembed_all` | After model change | High (~138ms/fact) |
+| Re-embed All | `sm_reembed_all` | After model change | High; measure on the target hardware and corpus |
 | Claim Compaction | `sm_compact_claim_ledger` | Auto at threshold | Low |
 
 ### Guardrails
@@ -711,15 +711,13 @@ PHASE 2: RECONCILE
 
 ## Performance & Scaling
 
-### Retrieval Performance
+### Measurement boundary
 
-| Operation | Latency | Notes |
-|-----------|---------|-------|
-| BM25 (FTS5) | <1ms | Sub-millisecond |
-| Vector (HNSW) | 5-20ms | 768-dim, approximate NN |
-| RRF Fusion | ~1ms | Rank merging |
-| Factor Graph BP | 10-50ms | Depends on edge count |
-| Witnessed Search | +2ms | Cache bypass + receipt |
+Latency, throughput, index size, and recall depend on the embedder, CPU/GPU,
+storage, corpus shape, selected shards, search profile, and receipt settings.
+This repository does not publish portable performance claims. Measure the exact
+deployment with its configuration and retain raw outputs, corpus identity, and
+binary version with any benchmark report.
 
 ### Compression Backends
 
@@ -734,10 +732,9 @@ PHASE 2: RECONCILE
 
 | Scale | SQLite Viability | Concern |
 |-------|-----------------|---------|
-| 1K facts (~22MB) | ✓ Excellent | All operations sub-50ms |
-| 10K facts (~200MB) | ✓ Good | HNSW construction slower |
-| 100K facts (~2GB) | ⚠ Moderate | Single-writer bottleneck |
-| 1M+ facts | ⚠ Sharding needed | SQLite ceiling ~1-4GB |
+| Small, single-device corpora | Suitable baseline | Verify local latency and recovery behavior |
+| Multi-device corpora | Route across eligible shards | Validate selection, receipt, and fallback behavior |
+| Large corpora | Capacity planning required | Benchmark ingestion, recovery, and search on the target host |
 
 ---
 
@@ -805,7 +802,7 @@ mnemes/                          # This crate
 
 ```
 Libraries/                       # Canonical workspace
-├── semantic-memory/             # Core library (v0.6.0)
+├── semantic-memory/             # Core library (v0.5.14)
 ├── semantic-memory-mcp/         # MCP server binary (v0.5.6)
 ├── semantic-memory-forge/       # Build/dev tooling
 └── agent-graph-mcp/             # Graph-orchestrated LLM workflows
@@ -818,7 +815,7 @@ Libraries/                       # Canonical workspace
 | Project | Description |
 |---------|-------------|
 | [`semantic-memory`](https://crates.io/crates/semantic-memory) | Core engine: SQLite store, HNSW, FTS5, knowledge graph, trust ledger |
-| [`semantic-memory-mcp`](https://crates.io/crates/semantic-memory-mcp) | MCP server exposing 60+ tools to AI agents |
+| [`semantic-memory-mcp`](https://crates.io/crates/semantic-memory-mcp) | MCP server with runtime-profiled tools for AI agents |
 | [`agent-graph-mcp`](https://github.com/RecursiveIntell/Libraries) | Graph-orchestrated LLM workflows |
 | [`agent-memory-kits`](https://github.com/RecursiveIntell/agent-memory-kits) | Hermes/Claude Code skill kits for memory operations |
 

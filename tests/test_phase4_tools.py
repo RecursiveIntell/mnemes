@@ -2,10 +2,12 @@ import http.server, importlib.util, json, os, stat, subprocess, tempfile, thread
 from pathlib import Path
 
 ROOT=Path(__file__).resolve().parents[1]
-CLIENT=ROOT/'scripts/mnemes-client.py'
-PROXY=ROOT/'scripts/mnemes-mcp-proxy.py'
-WRAPPER=ROOT/'scripts/pooled-codex-task.sh'
-INSTALL=ROOT/'scripts/install-mnemes-service.sh'
+CLIENT=ROOT/'scripts/mneme-client.py'
+PROXY=ROOT/'scripts/mneme-mcp-proxy.py'
+WRAPPER=ROOT/'scripts/mneme-codex-task.sh'
+INSTALL=ROOT/'scripts/install-mneme-service.sh'
+INSTALLER=ROOT/'install.sh'
+TAILSCALE=ROOT/'scripts/setup-mnemes-tailscale.sh'
 
 class Handler(http.server.BaseHTTPRequestHandler):
     malformed=False
@@ -58,11 +60,44 @@ class Phase4Tools(unittest.TestCase):
             r=subprocess.run([str(PROXY)],input=request,env=self.env(d),text=True,capture_output=True)
             self.assertEqual(r.returncode,0,r.stderr); self.assertEqual(json.loads(r.stdout)['id'],7)
             self.assertEqual(Handler.seen[-1]['params']['actor_id'],'actor-1')
+
+    def test_proxy_wraps_raw_tool_payload_as_mcp_call_tool_result(self):
+        with tempfile.TemporaryDirectory() as d:
+            request=json.dumps({'jsonrpc':'2.0','id':8,'method':'tools/call','params':{'name':'sm_health','arguments':{}}})+'\n'
+            r=subprocess.run([str(PROXY)],input=request,env=self.env(d),text=True,capture_output=True)
+            self.assertEqual(r.returncode,0,r.stderr)
+            result=json.loads(r.stdout)['result']
+            self.assertFalse(result['isError'])
+            self.assertEqual(result['structuredContent'], {'ok':True,'receipt_id':'receipt-1'})
+            self.assertEqual(json.loads(result['content'][0]['text']), result['structuredContent'])
+            self.assertEqual(Handler.seen[-1]['params']['actor_id'],'actor-1')
+
     def test_install_audit_has_no_side_effect(self):
         with tempfile.TemporaryDirectory() as d:
             e=os.environ.copy(); e['HOME']=d
             r=subprocess.run([str(INSTALL)],env=e,text=True,capture_output=True)
             self.assertEqual(r.returncode,0); self.assertFalse((Path(d)/'.config/mnemes').exists())
+    def test_installer_exposes_tailscale_flow(self):
+        r=subprocess.run([str(INSTALLER),'--help'],text=True,capture_output=True)
+        self.assertEqual(r.returncode,0,r.stderr)
+        self.assertIn('--with-tailscale',r.stdout)
+        self.assertIn('--tailscale-only',r.stdout)
+
+    def test_tailscale_audit_is_non_mutating_and_clear(self):
+        with tempfile.TemporaryDirectory() as d:
+            e=os.environ.copy(); e['HOME']=d; e['MNEMES_TAILSCALE_PORT']='1738'
+            r=subprocess.run([str(TAILSCALE),'--audit'],env=e,text=True,capture_output=True)
+            self.assertEqual(r.returncode,0,r.stderr)
+            self.assertIn('AUDIT',r.stdout)
+            self.assertIn('loopback',r.stdout.lower())
+            self.assertFalse((Path(d)/'.config/mnemes').exists())
+
+    def test_tailscale_help_documents_apply_boundary(self):
+        r=subprocess.run([str(TAILSCALE),'--help'],text=True,capture_output=True)
+        self.assertEqual(r.returncode,0,r.stderr)
+        self.assertIn('--apply',r.stdout)
+        self.assertIn('--install-missing',r.stdout)
+
     def test_codex_exit_code_preserved(self):
         with tempfile.TemporaryDirectory() as d:
             root=Path(d); bindir=root/'bin'; bindir.mkdir(); receipts=root/'receipts'

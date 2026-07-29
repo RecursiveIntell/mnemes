@@ -2,14 +2,25 @@
 """Line-delimited stdio JSON-RPC bridge to mnemes HTTP MCP."""
 import importlib.util, json, sys
 from pathlib import Path
-_module_path = Path(__file__).resolve().with_name("mnemes-client.py")
-_spec = importlib.util.spec_from_file_location("mnemes_client", _module_path)
+_module_path = Path(__file__).resolve().with_name("mneme-client.py")
+_spec = importlib.util.spec_from_file_location("mneme_client", _module_path)
 _module = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(_module)
 PooledClient, ClientError = _module.PooledClient, _module.ClientError
 
 def respond(value):
     sys.stdout.write(json.dumps(value,separators=(",",":"))+"\n"); sys.stdout.flush()
+
+def call_tool_result(payload):
+    """Return an MCP CallToolResult without discarding an upstream compliant one."""
+    if isinstance(payload, dict) and isinstance(payload.get("content"), list):
+        return payload
+    text = json.dumps(payload, separators=(",",":"), sort_keys=True)
+    return {
+        "content": [{"type": "text", "text": text}],
+        "structuredContent": payload,
+        "isError": False,
+    }
 def main():
     client=PooledClient()
     for line in sys.stdin:
@@ -32,6 +43,8 @@ def main():
                 continue
             if method in ("tools/list","tools/call"): params.setdefault("actor_id",client.actor_id)
             _,result=client.request("/v1/mcp","POST",{"jsonrpc":"2.0","id":ident,"method":method,"params":params})
+            if method == "tools/call" and "result" in result:
+                result["result"] = call_tool_result(result["result"])
             result["id"]=ident
             respond(result)
         except ClientError as e: respond({"jsonrpc":"2.0","id":locals().get("ident"),"error":{"code":-32000,"message":str(e)}})

@@ -43,7 +43,6 @@ pub const SCHEMA_VERSION: &str = "mnemes.server.v1";
 pub struct ServerState {
     store: Arc<MnemesStore>,
     server_id: String,
-    trusted_keys: Arc<crate::replication::TrustedKeyRegistry>,
 }
 
 #[cfg(feature = "server")]
@@ -368,7 +367,6 @@ pub fn build_router(store: MnemesStore) -> Router {
     build_router_with_state(ServerState {
         store: Arc::new(store),
         server_id: Uuid::new_v4().to_string(),
-        trusted_keys: Arc::new(crate::replication::TrustedKeyRegistry::new()),
     })
 }
 
@@ -400,7 +398,8 @@ fn build_router_with_state(state: ServerState) -> Router {
         )
         .route("/v1/operations/:operation_id", get(get_operation_handler))
         .route("/v1/search/witnessed", post(search_witnessed_handler))
-        .route("/v1/sync", post(sync_endpoint))
+        .route("/v1/sync", post(legacy_sync_disabled_handler))
+        .route("/v1/sync/facts", post(legacy_sync_disabled_handler))
         .route("/v1/receipts/:receipt_id", get(get_receipt_handler))
         .route("/v1/audit/events", get(list_audit_events_handler))
         .route("/mcp", post(mcp_handler))
@@ -1921,37 +1920,15 @@ async fn search_witnessed_handler(
 }
 
 #[cfg(feature = "server")]
-async fn sync_endpoint(
-    headers: HeaderMap,
-    State(state): State<ServerState>,
-    Json(request): Json<crate::sync_handler::SyncRequest>,
-) -> Response {
-    let _ = match authorize(&state, &headers, None).await {
-        Ok(ctx) => ctx,
-        Err(error) => return error_response(&error),
-    };
-    // Replicas live under base_dir/replicas/{store_id}.db
-    let replica_base = state.store.base_dir().join("replicas");
-    std::fs::create_dir_all(&replica_base).ok();
-    // Dispatch: replay raw SQL payload against the replica connection.
-    // The payload is a hex-encoded raw journal entry (SQL statements to
-    // replay the semantic-memory mutation against the replica DB).
-    let dispatch = |conn: &rusqlite::Connection, _kind: &str, payload: &[u8]| {
-        // Decode payload as UTF-8 SQL batch and execute it
-        let sql = std::str::from_utf8(payload)
-            .map_err(|e| MnemesError::Replication(format!("payload not valid UTF-8 SQL: {e}")))?;
-        conn.execute_batch(sql)
-            .map_err(|e| MnemesError::Replication(format!("replay SQL batch failed: {e}")))
-    };
-    match crate::sync_handler::process_sync_request(
-        request,
-        &state.trusted_keys,
-        &replica_base,
-        &dispatch,
-    ) {
-        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
-        Err(error) => error_response(&error),
-    }
+async fn legacy_sync_disabled_handler() -> Response {
+    (
+        StatusCode::NOT_IMPLEMENTED,
+        Json(serde_json::json!({
+            "error": "SYNC_DISABLED",
+            "message": "Legacy synchronization is disabled; typed signed replication is required",
+        })),
+    )
+        .into_response()
 }
 
 async fn build_health_payload(state: &ServerState) -> HealthResponse {

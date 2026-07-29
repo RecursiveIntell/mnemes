@@ -9,6 +9,9 @@ use crate::replica::{ApplyOutcome, ReplicaApplier};
 use crate::replication::TrustedKeyRegistry;
 use rusqlite::Connection;
 
+/// Typed replay boundary supplied by semantic-memory, the canonical mutation owner.
+pub type ReplayDispatch = dyn Fn(&Connection, &str, &[u8]) -> Result<(), MnemesError>;
+
 /// Result of synchronizing one journal batch.
 #[derive(Debug)]
 pub struct SyncResult {
@@ -117,23 +120,26 @@ pub struct JournalPayload {
 /// 3. Envelope parsing and admission are deferred to the transport layer
 /// 4. Applies the entry via `ReplicaApplier`
 /// 5. Records outcome
+pub struct SyncBatchRequest<'a> {
+    pub device_conn: &'a Connection,
+    pub replica_applier: &'a ReplicaApplier,
+    pub registry: &'a TrustedKeyRegistry,
+    pub home_device_id: &'a str,
+    pub store_id: &'a str,
+    pub start_sequence: i64,
+    pub max_batch: usize,
+}
+
 pub fn sync_batch(
-    device_conn: &Connection,
-    replica_applier: &ReplicaApplier,
-    registry: &TrustedKeyRegistry,
-    home_device_id: &str,
-    store_id: &str,
-    start_sequence: i64,
-    max_batch: usize,
-    /* replay dispatcher */
-    dispatch: &dyn Fn(&Connection, &str, &[u8]) -> Result<(), MnemesError>,
+    request: SyncBatchRequest<'_>,
+    dispatch: &ReplayDispatch,
 ) -> Result<SyncResult, MnemesError> {
     let (entries, next_seq, has_more) = export_device_journal(
-        device_conn,
-        home_device_id,
-        store_id,
-        start_sequence,
-        max_batch,
+        request.device_conn,
+        request.home_device_id,
+        request.store_id,
+        request.start_sequence,
+        request.max_batch,
     )?;
 
     let mut synced = 0;
@@ -142,10 +148,10 @@ pub fn sync_batch(
     for entry in &entries {
         // Accept raw journal payloads here. Full envelope parsing and
         // admission are deferred to the transport layer.
-        let _ = registry;
+        let _ = request.registry;
 
         // Apply to replica
-        match replica_applier.apply_entry(
+        match request.replica_applier.apply_entry(
             entry.sequence,
             &entry.operation_kind,
             &entry.payload,
