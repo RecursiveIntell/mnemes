@@ -1,10 +1,11 @@
 #[cfg(feature = "server")]
 use crate::{
-    Actor, ActorId, Device, DeviceId, MnemesError, MnemesStore, OperationEnvelope, OperationId,
-    OperationKind, ToolProfile,
+    replication::SignedFactCreateBatchV1, Actor, ActorId, Device, DeviceId, MnemesError,
+    MnemesStore, OperationEnvelope, OperationId, OperationKind, ToolProfile,
 };
 #[cfg(feature = "server")]
 use axum::{
+    body::Bytes,
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
     response::{IntoResponse, Response},
@@ -22,6 +23,8 @@ use semantic_memory::{
 use serde::{Deserialize, Serialize};
 #[cfg(feature = "server")]
 use serde_json::{json, Value};
+#[cfg(feature = "server")]
+use sha2::{Digest, Sha256};
 #[cfg(feature = "server")]
 use std::time::Duration;
 #[cfg(feature = "server")]
@@ -398,6 +401,7 @@ fn build_router_with_state(state: ServerState) -> Router {
         )
         .route("/v1/operations/:operation_id", get(get_operation_handler))
         .route("/v1/search/witnessed", post(search_witnessed_handler))
+        .route("/v1/replication/fact-create/v1", post(fact_create_handler))
         .route("/v1/sync", post(legacy_sync_disabled_handler))
         .route("/v1/sync/facts", post(legacy_sync_disabled_handler))
         .route("/v1/receipts/:receipt_id", get(get_receipt_handler))
@@ -409,8 +413,99 @@ fn build_router_with_state(state: ServerState) -> Router {
             StatusCode::REQUEST_TIMEOUT,
             Duration::from_secs(30),
         ))
-        .layer(RequestBodyLimitLayer::new(64 * 1024))
+        .layer(RequestBodyLimitLayer::new(
+            crate::replication::FACT_CREATE_TRANSPORT_MAX_WIRE_BYTES,
+        ))
         .layer(ConcurrencyLimitLayer::new(64))
+}
+
+#[cfg(feature = "server")]
+#[derive(Serialize)]
+struct FactCreateAck {
+    protocol: &'static str,
+    batch_id: String,
+    request_digest: String,
+    home_device_id: String,
+    store_id: String,
+    stream_epoch: u64,
+    accepted_head: i64,
+    disposition: String,
+}
+
+#[cfg(feature = "server")]
+async fn fact_create_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    body: Bytes,
+) -> Response {
+    let batch = match SignedFactCreateBatchV1::decode_json(&body) {
+        Ok(v) => v,
+        Err(_e) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid fact-create envelope",
+                }),
+            )
+                .into_response()
+        }
+    };
+    let context = match authorize(&state, &headers, None).await {
+        Ok(v) => v,
+        Err(e) => return error_response(&e),
+    };
+    if batch.home_device_id != context.device.device_id.as_str() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "home device mismatch",
+            }),
+        )
+            .into_response();
+    }
+    let request_digest = format!("{:x}", Sha256::digest(&body));
+    let ack = match state
+        .store
+        .apply_fact_create_request(&batch, request_digest)
+        .await
+    {
+        Ok(ack) => ack,
+        Err(MnemesError::FactCreateRejected(reason))
+            if reason.contains("conflict") || reason.contains("collision") =>
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "fact-create conflict",
+                }),
+            )
+                .into_response();
+        }
+        Err(MnemesError::FactCreateRejected(_)) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "fact-create admission rejected",
+                }),
+            )
+                .into_response();
+        }
+        Err(error) => return error_response(&error),
+    };
+    (
+        StatusCode::OK,
+        Json(FactCreateAck {
+            protocol: "mnemes.fact-create.v1",
+            batch_id: ack.batch_id,
+            request_digest: ack.request_digest,
+            home_device_id: ack.home_device_id,
+            store_id: ack.store_id,
+            stream_epoch: ack.stream_epoch,
+            accepted_head: ack.accepted_head,
+            disposition: ack.disposition,
+        }),
+    )
+        .into_response()
 }
 
 #[cfg(feature = "server")]

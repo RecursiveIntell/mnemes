@@ -25,7 +25,8 @@ candle-local = ["semantic-memory/candle-embedder"]
 matryoshka = ["semantic-memory/matryoshka"]
 
 [dependencies]
-semantic-memory = { version = "0.5", default-features = false, features = ["hnsw"] }
+# Temporary local integration pin; release must use a published, semver-pinned V38/V39 artifact.
+semantic-memory = { version = "0.5.14", path = "../Libraries/semantic-memory", default-features = false, features = ["hnsw"] }
 rusqlite = { version = "0.32", features = ["bundled", "blob"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "net"] }
 serde = { version = "1", features = ["derive"] }

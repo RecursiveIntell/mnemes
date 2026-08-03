@@ -51,6 +51,9 @@ pub enum MnemesError {
     #[error("replication error: {0}")]
     Replication(String),
 
+    #[error("fact-create admission rejected: {0}")]
+    FactCreateRejected(String),
+
     #[error("underlying memory error: {0}")]
     Memory(#[from] semantic_memory::MemoryError),
 }

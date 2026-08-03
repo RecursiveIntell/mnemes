@@ -1,6 +1,12 @@
+use ed25519_dalek::SigningKey;
+use mnemes::replication::{FactCreateTransportEntryV1, SignedFactCreateBatchV1};
 use mnemes::server::{build_memory_store, build_router};
-use mnemes::MnemesStore;
+use mnemes::{Device, DeviceId, FactCreateAdmission, MnemesStore};
 use reqwest::{Client, StatusCode};
+use semantic_memory::journal::{
+    encode_fact_create_payload, envelope_digest, payload_digest, FactCreatePayloadV1, JournalEntry,
+    FACT_CREATE_OPERATION, FACT_CREATE_PAYLOAD_SCHEMA, GENESIS_PREDECESSOR, VERIFIED_RECORD_STATE,
+};
 use serde_json::{json, Value};
 use std::path::PathBuf;
 use tempfile::TempDir;
@@ -19,6 +25,18 @@ struct RunningServer {
     base_url: String,
     _temp_dir: TempDir,
     _handle: JoinHandle<()>,
+}
+
+impl RunningServer {
+    async fn stop(self) {
+        let _ = self.stop_keep_temp().await;
+    }
+
+    async fn stop_keep_temp(self) -> TempDir {
+        self._handle.abort();
+        let _ = self._handle.await;
+        self._temp_dir
+    }
 }
 
 async fn open_store() -> (TempDir, MnemesStore) {
@@ -124,6 +142,217 @@ async fn register_actor(
     ActorIdentity {
         actor_id: body["actor_id"].as_str().unwrap().to_string(),
     }
+}
+
+fn fact_batch(
+    home: &str,
+    store_id: &str,
+    namespace: &str,
+    fence: &str,
+) -> (SignedFactCreateBatchV1, SigningKey) {
+    let payload = encode_fact_create_payload(&FactCreatePayloadV1 {
+        fact_id: "00000000-0000-0000-0000-000000000001".into(),
+        namespace: namespace.into(),
+        content: "typed HTTP replication test fact".into(),
+        source: Some("test".into()),
+        metadata: None,
+    })
+    .unwrap();
+    let pd = payload_digest(&payload);
+    let entry = JournalEntry {
+        journal_id: 1,
+        home_device_id: home.into(),
+        store_id: store_id.into(),
+        stream_epoch: 7,
+        sequence: 1,
+        operation_kind: FACT_CREATE_OPERATION.into(),
+        payload_schema: FACT_CREATE_PAYLOAD_SCHEMA.into(),
+        payload,
+        payload_digest: pd,
+        predecessor_digest: GENESIS_PREDECESSOR,
+        envelope_digest: envelope_digest(
+            home,
+            store_id,
+            7,
+            1,
+            FACT_CREATE_OPERATION,
+            FACT_CREATE_PAYLOAD_SCHEMA,
+            &GENESIS_PREDECESSOR,
+            &pd,
+        ),
+        record_state: VERIFIED_RECORD_STATE.into(),
+        created_at: "2026-07-29T00:00:00Z".into(),
+    };
+    let entry = FactCreateTransportEntryV1::from_journal_entry(&entry).unwrap();
+    let key = SigningKey::from_bytes(&[7u8; 32]);
+    let mut batch = SignedFactCreateBatchV1::new(
+        "batch-http-1",
+        home,
+        store_id,
+        7,
+        1,
+        vec![entry],
+        "http-replication-key",
+        1,
+        1_000,
+        fence,
+    )
+    .unwrap();
+    batch.sign(&key).unwrap();
+    (batch, key)
+}
+
+async fn fact_count(store: &MnemesStore, device_id: &str) -> u64 {
+    store
+        .device_memory(&DeviceId::parse(device_id).unwrap())
+        .await
+        .unwrap()
+        .stats()
+        .await
+        .unwrap()
+        .total_facts as u64
+}
+
+async fn post_fact(
+    server: &RunningServer,
+    client: &Client,
+    device: &DeviceIdentity,
+    batch: &SignedFactCreateBatchV1,
+) -> (StatusCode, Value) {
+    let response = client
+        .post(format!("{}/v1/replication/fact-create/v1", server.base_url))
+        .bearer_auth(&device.credential)
+        .json(batch)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, response.json().await.unwrap())
+}
+
+async fn spawn_admitted_server() -> (RunningServer, DeviceIdentity, MnemesStore) {
+    let (temp, store) = open_store().await;
+    let device_id = DeviceId::new();
+    let (registered, credential) = store
+        .register_device_with_generated_credential(Device::new(
+            device_id.clone(),
+            "ci-device",
+            "linux",
+            "localhost",
+        ))
+        .await
+        .unwrap();
+    store
+        .admit_fact_create_key(FactCreateAdmission {
+            device_id: registered.clone(),
+            store_id: "primary".into(),
+            namespace: "general".into(),
+            principal_id: "http-replication-key".into(),
+            key_version: 1,
+            public_key: SigningKey::from_bytes(&[7u8; 32])
+                .verifying_key()
+                .to_bytes(),
+            activated_at: 0,
+            cutoff_at: i64::MAX as u64,
+            stream_epoch: 7,
+            fencing_token: "fence-7".into(),
+        })
+        .await
+        .unwrap();
+    let count_store = MnemesStore::open_with_embedder(
+        temp.path().join("pooled-store"),
+        semantic_memory::MemoryConfig {
+            base_dir: temp.path().to_path_buf(),
+            ..Default::default()
+        },
+        Box::new(semantic_memory::MockEmbedder::new(768)),
+    )
+    .unwrap();
+    let server = spawn_server_with_store(temp, store).await;
+    (
+        server,
+        DeviceIdentity {
+            device_id: registered.to_string(),
+            credential,
+        },
+        count_store,
+    )
+}
+
+#[cfg(feature = "server")]
+#[tokio::test]
+async fn fact_create_http_applies_then_duplicates_without_second_fact() {
+    let (server, device, count_store) = spawn_admitted_server().await;
+    let client = Client::new();
+    let (batch, _) = fact_batch(&device.device_id, "primary", "general", "fence-7");
+    let (status, body) = post_fact(&server, &client, &device, &batch).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body["disposition"], "accepted");
+    assert_eq!(body["batch_id"], batch.batch_id);
+    assert_eq!(body["accepted_head"], 1);
+    assert_eq!(fact_count(&count_store, &device.device_id).await, 1);
+    let (status, body2) = post_fact(&server, &client, &device, &batch).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(body2, body);
+    assert_eq!(fact_count(&count_store, &device.device_id).await, 1);
+}
+
+#[cfg(feature = "server")]
+#[tokio::test]
+async fn fact_create_http_rejects_admission_scope_and_signature_before_mutation() {
+    let (server, device, count_store) = spawn_admitted_server().await;
+    let client = Client::new();
+    for (batch, expected) in [
+        (
+            fact_batch(&device.device_id, "primary", "other", "fence-7").0,
+            StatusCode::FORBIDDEN,
+        ),
+        (
+            fact_batch(&device.device_id, "primary", "general", "wrong-fence").0,
+            StatusCode::FORBIDDEN,
+        ),
+    ] {
+        let (status, _) = post_fact(&server, &client, &device, &batch).await;
+        assert_eq!(status, expected);
+    }
+    let (mut bad, _) = fact_batch(&device.device_id, "primary", "general", "fence-7");
+    bad.signature[0] ^= 1;
+    let (status, _) = post_fact(&server, &client, &device, &bad).await;
+    assert_eq!(status, StatusCode::BAD_REQUEST);
+    assert_eq!(fact_count(&count_store, &device.device_id).await, 0);
+}
+
+#[cfg(feature = "server")]
+#[tokio::test]
+async fn fact_create_http_rejects_unadmitted_and_revoked_keys() {
+    let (server, device, count_store) = spawn_admitted_server().await;
+    let client = Client::new();
+    let (mut unadmitted, key) = fact_batch(&device.device_id, "primary", "general", "fence-7");
+    unadmitted.signer_principal_id = "unadmitted".into();
+    unadmitted.sign(&key).unwrap();
+    let (status, _) = post_fact(&server, &client, &device, &unadmitted).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+    let device_id = DeviceId::parse(&device.device_id).unwrap();
+    let _ = count_store
+        .revoke_fact_create_key(&device_id, "primary", "general", "http-replication-key", 1)
+        .await;
+    let (batch, _) = fact_batch(&device.device_id, "primary", "general", "fence-7");
+    let (status, _) = post_fact(&server, &client, &device, &batch).await;
+    assert_eq!(status, StatusCode::FORBIDDEN);
+}
+
+#[cfg(feature = "server")]
+#[tokio::test]
+async fn fact_create_http_duplicate_survives_store_reopen() {
+    let (server, device, count_store) = spawn_admitted_server().await;
+    let client = Client::new();
+    let (batch, _) = fact_batch(&device.device_id, "primary", "general", "fence-7");
+    assert_eq!(
+        post_fact(&server, &client, &device, &batch).await.0,
+        StatusCode::OK
+    );
+    assert_eq!(fact_count(&count_store, &device.device_id).await, 1);
+    drop(server);
 }
 
 #[cfg(feature = "server")]
@@ -1046,4 +1275,121 @@ async fn legacy_sync_routes_fail_closed_before_auth_or_body_processing() {
         let response_body: Value = response.json().await.unwrap();
         assert_eq!(response_body["error"], "SYNC_DISABLED", "{route}");
     }
+}
+
+#[cfg(feature = "server")]
+#[tokio::test]
+async fn fact_create_http_rejects_batches_outside_admission_window_before_and_after_cutoff() {
+    let (server, device, count_store) = spawn_admitted_server().await;
+    let client = Client::new();
+    let (mut batch, key) = fact_batch(&device.device_id, "primary", "general", "fence-7");
+    count_store
+        .admit_fact_create_key(FactCreateAdmission {
+            device_id: DeviceId::parse(&device.device_id).unwrap(),
+            store_id: "primary".into(),
+            namespace: "general".into(),
+            principal_id: "http-replication-key".into(),
+            key_version: 1,
+            public_key: key.verifying_key().to_bytes(),
+            activated_at: 2_000,
+            cutoff_at: 3_000,
+            stream_epoch: 7,
+            fencing_token: "fence-7".into(),
+        })
+        .await
+        .unwrap();
+    batch.batch_id = "batch-before-activation".into();
+    batch.sign(&key).unwrap();
+    assert_eq!(
+        post_fact(&server, &client, &device, &batch).await.0,
+        StatusCode::FORBIDDEN
+    );
+    let (mut after, _) = fact_batch(&device.device_id, "primary", "general", "fence-7");
+    after.batch_id = "batch-after-cutoff".into();
+    after.observed_at = 4_000;
+    after.sign(&key).unwrap();
+    assert_eq!(
+        post_fact(&server, &client, &device, &after).await.0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(fact_count(&count_store, &device.device_id).await, 0);
+}
+
+#[cfg(feature = "server")]
+#[tokio::test]
+async fn fact_create_http_rejects_same_batch_id_with_changed_signed_body() {
+    let (server, device, count_store) = spawn_admitted_server().await;
+    let client = Client::new();
+    let (batch, key) = fact_batch(&device.device_id, "primary", "general", "fence-7");
+    assert_eq!(
+        post_fact(&server, &client, &device, &batch).await.0,
+        StatusCode::OK
+    );
+    let mut altered = batch.clone();
+    altered.observed_at += 1;
+    altered.sign(&key).unwrap();
+    assert_eq!(
+        post_fact(&server, &client, &device, &altered).await.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(fact_count(&count_store, &device.device_id).await, 1);
+}
+
+#[cfg(feature = "server")]
+#[tokio::test]
+async fn fact_create_http_recovers_when_semantic_fact_preexists_without_ack() {
+    let (server, device, count_store) = spawn_admitted_server().await;
+    let client = Client::new();
+    let (batch, _) = fact_batch(&device.device_id, "primary", "general", "fence-7");
+    let envelope = batch.semantic_envelopes().unwrap().remove(0);
+    count_store
+        .device_memory(&DeviceId::parse(&device.device_id).unwrap())
+        .await
+        .unwrap()
+        .apply_verified_fact_create(envelope)
+        .await
+        .unwrap();
+    let (status, ack) = post_fact(&server, &client, &device, &batch).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ack["disposition"], "accepted");
+    assert_eq!(post_fact(&server, &client, &device, &batch).await.1, ack);
+    assert_eq!(fact_count(&count_store, &device.device_id).await, 1);
+}
+
+#[cfg(feature = "server")]
+#[tokio::test]
+async fn fact_create_http_exact_retry_survives_real_store_reopen() {
+    let (server, device, count_store) = spawn_admitted_server().await;
+    let client = Client::new();
+    let (batch, _) = fact_batch(&device.device_id, "primary", "general", "fence-7");
+    let (status, ack) = post_fact(&server, &client, &device, &batch).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(fact_count(&count_store, &device.device_id).await, 1);
+    let temp = server.stop_keep_temp().await;
+    drop(count_store);
+    let base = temp.path().to_path_buf();
+    let reopened = MnemesStore::open_with_embedder(
+        base.join("pooled-store"),
+        semantic_memory::MemoryConfig {
+            base_dir: base,
+            ..Default::default()
+        },
+        Box::new(semantic_memory::MockEmbedder::new(768)),
+    )
+    .unwrap();
+    let reopened_count = MnemesStore::open_with_embedder(
+        temp.path().join("pooled-store"),
+        semantic_memory::MemoryConfig {
+            base_dir: temp.path().to_path_buf(),
+            ..Default::default()
+        },
+        Box::new(semantic_memory::MockEmbedder::new(768)),
+    )
+    .unwrap();
+    let server = spawn_server_with_store(temp, reopened).await;
+    let (retry_status, retry_ack) = post_fact(&server, &client, &device, &batch).await;
+    assert_eq!(retry_status, StatusCode::OK);
+    assert_eq!(retry_ack, ack);
+    assert_eq!(fact_count(&reopened_count, &device.device_id).await, 1);
+    server.stop().await;
 }

@@ -2,6 +2,7 @@
 //! database and lazily opened device-owned `semantic_memory::MemoryStore` shards.
 
 use crate::error::MnemesError;
+use crate::replication::SignedFactCreateBatchV1;
 use crate::shards::*;
 use crate::types::*;
 use chrono::{DateTime, Utc};
@@ -347,14 +348,45 @@ impl DeviceCredential {
     }
 }
 
-/// Combined mnemes memory store.
+/// One operator-provisioned fact-create signing-key admission record.
 ///
-/// Owns a device/actor/operation SQLite database alongside a
-/// lazily opened `semantic_memory::MemoryStore` shards. The databases are separate:
+/// This record lives in Mnemes' control-plane SQLite database. It is never
+/// accepted from the HTTP transport and must be provisioned by a trusted local
+/// operator path before a device can submit signed fact-create batches.
+#[derive(Debug, Clone)]
+pub struct FactCreateAdmission {
+    pub device_id: DeviceId,
+    pub store_id: String,
+    pub namespace: String,
+    pub principal_id: String,
+    pub key_version: u64,
+    pub public_key: [u8; 32],
+    pub activated_at: u64,
+    pub cutoff_at: u64,
+    pub stream_epoch: u64,
+    pub fencing_token: String,
+}
+
+/// Combined Mnemes control-plane store.
+///
+/// Owns a device/actor/operation SQLite database alongside lazily opened
+/// `semantic_memory::MemoryStore` shards. The databases are separate:
 /// - `pooled.db` — device registry, actors, operation envelopes
 /// - `memory/shards/<device_uuid>/memory.db` — semantic truth owned by semantic-memory
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FactCreateAckRecord {
+    pub batch_id: String,
+    pub request_digest: String,
+    pub home_device_id: String,
+    pub store_id: String,
+    pub stream_epoch: u64,
+    pub accepted_head: i64,
+    pub disposition: String,
+}
+
 pub struct MnemesStore {
     pool_conn: tokio::sync::Mutex<rusqlite::Connection>,
+    fact_create_gate: tokio::sync::Mutex<()>,
     base_dir: PathBuf,
     memory_config: semantic_memory::MemoryConfig,
     embedder: Arc<dyn semantic_memory::Embedder>,
@@ -439,6 +471,7 @@ impl MnemesStore {
         Self::ensure_existing_shard_directories(&base_dir, &conn)?;
         Ok(Self {
             pool_conn: tokio::sync::Mutex::new(conn),
+            fact_create_gate: tokio::sync::Mutex::new(()),
             base_dir,
             memory_config,
             embedder,
@@ -630,8 +663,71 @@ impl MnemesStore {
                 recorded_at                TEXT NOT NULL
             );
             CREATE INDEX IF NOT EXISTS idx_shard_routing_receipts_requester
-                ON shard_routing_receipts(requester_device_id, recorded_at DESC);",
+                ON shard_routing_receipts(requester_device_id, recorded_at DESC);
+            CREATE TABLE IF NOT EXISTS fact_create_admissions (
+                device_id TEXT NOT NULL REFERENCES devices(device_id),
+                store_id TEXT NOT NULL,
+                namespace TEXT NOT NULL,
+                principal_id TEXT NOT NULL,
+                key_version INTEGER NOT NULL CHECK(key_version > 0),
+                public_key BLOB NOT NULL CHECK(length(public_key)=32),
+                activated_at INTEGER NOT NULL CHECK(activated_at >= 0),
+                cutoff_at INTEGER NOT NULL CHECK(cutoff_at >= activated_at),
+                revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0, 1)),
+                stream_epoch INTEGER NOT NULL CHECK(stream_epoch > 0),
+                fencing_token TEXT NOT NULL,
+                PRIMARY KEY(device_id, store_id, namespace, principal_id, key_version)
+            );
+            CREATE INDEX IF NOT EXISTS idx_fact_create_admission_scope
+                ON fact_create_admissions(device_id, store_id, namespace);
+            CREATE TABLE IF NOT EXISTS fact_create_acks (
+                batch_id TEXT PRIMARY KEY,
+                request_digest TEXT NOT NULL,
+                home_device_id TEXT NOT NULL,
+                store_id TEXT NOT NULL,
+                stream_epoch INTEGER NOT NULL,
+                accepted_head INTEGER NOT NULL,
+                disposition TEXT NOT NULL
+            );",
         )?;
+        for (table, columns) in [
+            (
+                "fact_create_admissions",
+                &[
+                    "device_id",
+                    "store_id",
+                    "namespace",
+                    "principal_id",
+                    "key_version",
+                    "public_key",
+                    "activated_at",
+                    "cutoff_at",
+                    "revoked",
+                    "stream_epoch",
+                    "fencing_token",
+                ] as &[&str],
+            ),
+            (
+                "fact_create_acks",
+                &[
+                    "batch_id",
+                    "request_digest",
+                    "home_device_id",
+                    "store_id",
+                    "stream_epoch",
+                    "accepted_head",
+                    "disposition",
+                ],
+            ),
+        ] {
+            for column in columns {
+                if !Self::has_table_column(conn, table, column)? {
+                    return Err(MnemesError::InvalidShardCatalog(format!(
+                        "{table} is missing required column {column}"
+                    )));
+                }
+            }
+        }
 
         let schema_generation = conn.query_row(
             "SELECT MAX(version) FROM _pooled_schema_version",
@@ -1455,7 +1551,183 @@ impl MnemesStore {
         })
     }
 
-    /// Open a device's semantic-memory owner store lazily through the bounded cache.
+    /// Local bootstrap-only admission API; no HTTP route exposes this.
+    pub async fn admit_fact_create_key(
+        &self,
+        admission: FactCreateAdmission,
+    ) -> Result<(), MnemesError> {
+        let _gate = self.fact_create_gate.lock().await;
+        if admission.store_id.is_empty()
+            || admission.namespace.is_empty()
+            || admission.principal_id.is_empty()
+            || admission.fencing_token.is_empty()
+            || admission.key_version == 0
+            || admission.stream_epoch == 0
+            || admission.activated_at > admission.cutoff_at
+        {
+            return Err(MnemesError::FactCreateRejected(
+                "invalid fact-create admission record".into(),
+            ));
+        }
+        let conn = self.pool_conn.lock().await;
+        conn.execute(
+            "INSERT INTO fact_create_admissions \
+             (device_id,store_id,namespace,principal_id,key_version,public_key,activated_at,cutoff_at,revoked,stream_epoch,fencing_token) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,0,?9,?10) \
+             ON CONFLICT(device_id,store_id,namespace,principal_id,key_version) DO UPDATE SET \
+             public_key=excluded.public_key,activated_at=excluded.activated_at,cutoff_at=excluded.cutoff_at,revoked=0,stream_epoch=excluded.stream_epoch,fencing_token=excluded.fencing_token",
+            rusqlite::params![
+                admission.device_id.as_str(),
+                admission.store_id,
+                admission.namespace,
+                admission.principal_id,
+                i64::try_from(admission.key_version).map_err(|_| MnemesError::FactCreateRejected("key version does not fit SQLite INTEGER".into()))?,
+                admission.public_key.as_slice(),
+                i64::try_from(admission.activated_at).map_err(|_| MnemesError::FactCreateRejected("activation time does not fit SQLite INTEGER".into()))?,
+                i64::try_from(admission.cutoff_at).map_err(|_| MnemesError::FactCreateRejected("cutoff time does not fit SQLite INTEGER".into()))?,
+                i64::try_from(admission.stream_epoch).map_err(|_| MnemesError::FactCreateRejected("stream epoch does not fit SQLite INTEGER".into()))?,
+                admission.fencing_token,
+            ],
+        )?;
+        Ok(())
+    }
+
+    pub async fn revoke_fact_create_key(
+        &self,
+        device_id: &DeviceId,
+        store_id: &str,
+        namespace: &str,
+        principal_id: &str,
+        key_version: u64,
+    ) -> Result<(), MnemesError> {
+        let _gate = self.fact_create_gate.lock().await;
+        let conn = self.pool_conn.lock().await;
+        conn.execute(
+            "UPDATE fact_create_admissions SET revoked=1 WHERE device_id=?1 AND store_id=?2 AND namespace=?3 AND principal_id=?4 AND key_version=?5",
+            rusqlite::params![device_id.as_str(), store_id, namespace, principal_id, key_version as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Atomically admit, apply, and acknowledge one V1 fact-create request.
+    ///
+    /// The gate serializes mutations within this process only. The Mnemes
+    /// control database must not be written by any other process; it does not
+    /// provide cross-process serialization with semantic-memory's database.
+    pub async fn apply_fact_create_request(
+        &self,
+        batch: &SignedFactCreateBatchV1,
+        request_digest: String,
+    ) -> Result<FactCreateAckRecord, MnemesError> {
+        let _gate = self.fact_create_gate.lock().await;
+        let existing = self.get_fact_create_ack_locked(&batch.batch_id).await?;
+        if let Some(existing) = existing {
+            if existing.request_digest != request_digest {
+                return Err(MnemesError::FactCreateRejected(
+                    "batch id digest collision".into(),
+                ));
+            }
+            return Ok(existing);
+        }
+        if batch.entries.len() != 1 {
+            return Err(MnemesError::FactCreateRejected(
+                "V1 accepts exactly one entry".into(),
+            ));
+        }
+        let envelopes = batch
+            .semantic_envelopes()
+            .map_err(|e| MnemesError::Replication(e.to_string()))?;
+        let payload =
+            semantic_memory::journal::validate_fact_create_replica_envelope(&envelopes[0])
+                .map_err(|e| MnemesError::FactCreateRejected(e.to_string()))?;
+        self.check_fact_create_admission_locked(batch, &payload.namespace)
+            .await?;
+        let memory = self
+            .device_memory(&DeviceId::parse(&batch.home_device_id)?)
+            .await?;
+        let decision = memory
+            .apply_verified_fact_create(envelopes[0].clone())
+            .await?;
+        let accepted_head = match decision {
+            semantic_memory::journal::ReplicaApplyOutcome::Applied { sequence, .. }
+            | semantic_memory::journal::ReplicaApplyOutcome::Duplicate { sequence } => sequence,
+            semantic_memory::journal::ReplicaApplyOutcome::Fork { .. }
+            | semantic_memory::journal::ReplicaApplyOutcome::Gap { .. }
+            | semantic_memory::journal::ReplicaApplyOutcome::EpochConflict { .. } => {
+                return Err(MnemesError::FactCreateRejected("semantic conflict".into()));
+            }
+        };
+        let ack = FactCreateAckRecord {
+            batch_id: batch.batch_id.clone(),
+            request_digest,
+            home_device_id: batch.home_device_id.clone(),
+            store_id: batch.store_id.clone(),
+            stream_epoch: batch.stream_epoch,
+            accepted_head,
+            disposition: "accepted".into(),
+        };
+        self.persist_fact_create_ack_locked(&ack).await?;
+        Ok(ack)
+    }
+
+    async fn check_fact_create_admission_locked(
+        &self,
+        batch: &SignedFactCreateBatchV1,
+        namespace: &str,
+    ) -> Result<(), MnemesError> {
+        self.check_fact_create_admission_inner(batch, namespace)
+            .await
+    }
+
+    async fn check_fact_create_admission_inner(
+        &self,
+        batch: &SignedFactCreateBatchV1,
+        namespace: &str,
+    ) -> Result<(), MnemesError> {
+        let device_id = DeviceId::parse(&batch.home_device_id)?;
+        let conn = self.pool_conn.lock().await;
+        let row: Option<(Vec<u8>, i64, i64, i64, i64, String)> = conn.query_row(
+            "SELECT public_key,activated_at,cutoff_at,revoked,stream_epoch,fencing_token \
+             FROM fact_create_admissions WHERE device_id=?1 AND store_id=?2 AND namespace=?3 AND principal_id=?4 AND key_version=?5",
+            rusqlite::params![device_id.as_str(), batch.store_id, namespace, batch.signer_principal_id, batch.signer_key_version as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        ).optional()?;
+        match row {
+            Some((pk, activated, cutoff, revoked, epoch, fence))
+                if pk.as_slice() == batch.signer_public_key
+                    && revoked == 0
+                    && activated >= 0
+                    && cutoff >= activated
+                    && batch.observed_at >= activated as u64
+                    && batch.observed_at <= cutoff as u64
+                    && epoch == batch.stream_epoch as i64
+                    && fence == batch.fencing_token =>
+            {
+                Ok(())
+            }
+            _ => Err(MnemesError::FactCreateRejected(
+                "key admission, lifecycle, scope, epoch, or fencing token rejected".into(),
+            )),
+        }
+    }
+
+    async fn get_fact_create_ack_locked(
+        &self,
+        batch_id: &str,
+    ) -> Result<Option<FactCreateAckRecord>, MnemesError> {
+        let conn = self.pool_conn.lock().await;
+        Ok(conn.query_row("SELECT batch_id,request_digest,home_device_id,store_id,stream_epoch,accepted_head,disposition FROM fact_create_acks WHERE batch_id=?1", [batch_id], |r| Ok(FactCreateAckRecord { batch_id:r.get(0)?, request_digest:r.get(1)?, home_device_id:r.get(2)?, store_id:r.get(3)?, stream_epoch:u64::try_from(r.get::<_, i64>(4)?).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, 0))?, accepted_head:r.get(5)?, disposition:r.get(6)? })).optional()?)
+    }
+
+    async fn persist_fact_create_ack_locked(
+        &self,
+        ack: &FactCreateAckRecord,
+    ) -> Result<(), MnemesError> {
+        let conn = self.pool_conn.lock().await;
+        conn.execute("INSERT INTO fact_create_acks (batch_id,request_digest,home_device_id,store_id,stream_epoch,accepted_head,disposition) VALUES (?1,?2,?3,?4,?5,?6,?7)", rusqlite::params![ack.batch_id,ack.request_digest,ack.home_device_id,ack.store_id,i64::try_from(ack.stream_epoch).map_err(|_| MnemesError::FactCreateRejected("stream epoch does not fit SQLite INTEGER".into()))?,ack.accepted_head,ack.disposition])?;
+        Ok(())
+    }
+
     pub async fn device_memory(
         &self,
         device_id: &DeviceId,

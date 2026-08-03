@@ -18,7 +18,7 @@ pub mod types;
 
 pub use error::MnemesError;
 pub use shards::*;
-pub use store::MnemesStore;
+pub use store::{FactCreateAckRecord, FactCreateAdmission, MnemesStore};
 pub use types::*;
 
 pub use semantic_memory;
