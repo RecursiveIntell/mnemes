@@ -918,7 +918,10 @@ impl MnemesStore {
         Ok((device_id, secret.to_string()))
     }
 
-    async fn token_device_id(&self, token: &str) -> Result<(Device, Option<String>), MnemesError> {
+    pub(crate) async fn token_device_id(
+        &self,
+        token: &str,
+    ) -> Result<(Device, Option<String>), MnemesError> {
         let (device_id, secret) = Self::parse_authorization_token(token)?;
         let mut row = {
             let conn = self.pool_conn.lock().await;

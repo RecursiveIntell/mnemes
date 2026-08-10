@@ -8,6 +8,7 @@
 pub mod error;
 pub mod replica;
 pub mod replication;
+pub mod run_pack;
 #[cfg(feature = "server")]
 pub mod server;
 pub mod shards;
@@ -17,6 +18,7 @@ pub mod sync_handler;
 pub mod types;
 
 pub use error::MnemesError;
+pub use run_pack::RunPackEvidenceProjectionV1;
 pub use shards::*;
 pub use store::{FactCreateAckRecord, FactCreateAdmission, MnemesStore};
 pub use types::*;

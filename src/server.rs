@@ -46,6 +46,7 @@ pub const SCHEMA_VERSION: &str = "mnemes.server.v1";
 pub struct ServerState {
     store: Arc<MnemesStore>,
     server_id: String,
+    run_pack_attestation_key: Option<Arc<[u8]>>,
 }
 
 #[cfg(feature = "server")]
@@ -366,10 +367,28 @@ struct OperationInfo {
 }
 
 #[cfg(feature = "server")]
+#[derive(Serialize)]
+struct RunPackObservationResponse {
+    receipt_id: String,
+    operation_id: String,
+    recorded_at: String,
+}
+
+#[cfg(feature = "server")]
 pub fn build_router(store: MnemesStore) -> Router {
     build_router_with_state(ServerState {
         store: Arc::new(store),
         server_id: Uuid::new_v4().to_string(),
+        run_pack_attestation_key: None,
+    })
+}
+
+#[cfg(feature = "server")]
+pub fn build_router_with_run_pack_attestation_key(store: MnemesStore, key: Vec<u8>) -> Router {
+    build_router_with_state(ServerState {
+        store: Arc::new(store),
+        server_id: Uuid::new_v4().to_string(),
+        run_pack_attestation_key: Some(Arc::from(key.into_boxed_slice())),
     })
 }
 
@@ -400,6 +419,10 @@ fn build_router_with_state(state: ServerState) -> Router {
             post(submit_operation_handler).get(list_operations_handler),
         )
         .route("/v1/operations/:operation_id", get(get_operation_handler))
+        .route(
+            "/v1/run-pack-observations",
+            post(import_run_pack_observation_handler),
+        )
         .route("/v1/search/witnessed", post(search_witnessed_handler))
         .route("/v1/replication/fact-create/v1", post(fact_create_handler))
         .route("/v1/sync", post(legacy_sync_disabled_handler))
@@ -1316,6 +1339,54 @@ async fn submit_operation_handler(
     };
 
     (StatusCode::CREATED, Json(response)).into_response()
+}
+
+#[cfg(feature = "server")]
+async fn import_run_pack_observation_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    body: Bytes,
+) -> Response {
+    // Authenticate before handing caller bytes to the importer. The importer
+    // repeats authentication because its library boundary is independently
+    // callable and must never gain an unauthenticated path.
+    let context = match authorize(&state, &headers, None).await {
+        Ok(context) => context,
+        Err(error) => return error_response(&error),
+    };
+    let token = match bearer_token(&headers) {
+        Ok(token) => token,
+        Err(error) => return error_response(&error),
+    };
+    let receipt = match state
+        .store
+        .import_run_pack_observation(&token, &body, state.run_pack_attestation_key.as_deref())
+        .await
+    {
+        Ok(receipt) => receipt,
+        Err(error) => return error_response(&error),
+    };
+    let _ = log_audit(
+        &state,
+        &AuditContext {
+            device: Some(context.device),
+            actor: context.actor,
+        },
+        "/v1/run-pack-observations",
+        "POST",
+        "ok",
+        Some("run-pack observation imported"),
+    )
+    .await;
+    (
+        StatusCode::CREATED,
+        Json(RunPackObservationResponse {
+            receipt_id: receipt.receipt_id,
+            operation_id: receipt.operation_id.to_string(),
+            recorded_at: receipt.recorded_at,
+        }),
+    )
+        .into_response()
 }
 
 #[cfg(feature = "server")]
