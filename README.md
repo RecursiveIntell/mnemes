@@ -52,9 +52,9 @@
 | **Bitemporal lineage** | When the observation was made (`valid_time`) vs. when the server recorded it (`recorded_at`) |
 | **Server-owned timestamps** | `recorded_at` is always stamped by the accepting server — never trusted from clients |
 | **Sparse shard routing** | Query-time ranking of device shards by token overlap + locality, with durable receipts |
-| **Signed replication** | Ed25519-signed mutation envelopes for device-to-server journal replay (in development) |
+| **Signed replication** | Ed25519-signed fact-create envelopes for device-to-server journal replay (fact-create verified; other mutation families in development) |
 
-> **Architecture status:** The current candidate implements server-side per-device shards and sparse routing. The target design keeps each canonical database on its home device and synchronizes a durable server replica. Continuous replication is under development — see [docs/DEVICE_OWNED_REPLICATED_MEMORY.md](docs/DEVICE_OWNED_REPLICATED_MEMORY.md).
+> **Architecture status:** The current candidate implements server-side per-device shards, sparse routing, and a verified **fact-create replication vertical slice**: a device's semantic-memory store journals every canonical fact creation, a sender exports one verified record per invocation, signs it with an Ed25519 key admitted through the operator CLI, and the server applies it atomically to the device's shard with a durable typed ACK. Other mutation families (supersede, redaction, messages, documents, graph edges, and the rest) are deliberately not admitted until their own mutation-policy gate passes — see [docs/DEVICE_OWNED_REPLICATED_MEMORY.md](docs/DEVICE_OWNED_REPLICATED_MEMORY.md).
 
 ### The Full Stack
 
@@ -379,7 +379,8 @@ println!("Searched {} of {} eligible shards",
 | `GET` | `/v1/operations` | List operations (filter by device/actor) |
 | `GET` | `/v1/operations/:id` | Get a specific operation |
 | `POST` | `/v1/search/witnessed` | Routed witnessed search |
-| `POST` | `/v1/sync` | Replication sync endpoint |
+| `POST` | `/v1/replication/fact-create/v1` | Typed signed fact-create replay: verify signature/key/scope, apply atomically, return a durable ACK |
+| `POST` | `/v1/sync` | **Legacy endpoint, disabled** — always returns `501 SYNC_DISABLED` before auth/body parsing |
 | `GET` | `/v1/receipts/:id` | Retrieve a durable receipt |
 | `GET` | `/v1/audit/events` | List audit events |
 | `POST` | `/mcp`, `/v1/mcp` | MCP JSON-RPC over HTTP |
@@ -405,6 +406,59 @@ mnemes-admin bootstrap <DATA_DIR> <LABEL> <PLATFORM> <HOSTNAME> [ACTOR_KIND]
 - Keep `<DATA_DIR>` under an operator-owned directory with `0700` permissions
 - The credential output is single-use sensitive material — save it securely
 - The bootstrap command exits non-zero if a device already exists in the data directory
+
+### Fact-create key admission
+
+Admit a device's Ed25519 signing key for one device/store/namespace scope before
+any signed batch will apply:
+
+```bash
+mnemes-admin fact-create-admit <DATA_DIR> <DEVICE_ID> <STORE_ID> <NAMESPACE> \
+  <PRINCIPAL_ID> <KEY_VERSION> <PUBLIC_KEY_HEX_32_BYTES> \
+  <ACTIVATED_AT_UNIX> <CUTOFF_AT_UNIX> <STREAM_EPOCH> <FENCING_TOKEN>
+```
+
+Revocation is immediate and durable: `mnemes-admin fact-create-revoke`.
+
+---
+
+## Device-owned fact-create replication
+
+The verified vertical slice moves one canonical fact-create record per
+invocation from a device's semantic-memory store to its server-owned shard:
+
+```text
+canonical fact creation
+  -> verified mutation_journal row (atomic with the fact, sequence allocated in-transaction)
+  -> mnemes-sync-client exports + signs one record
+  -> POST /v1/replication/fact-create/v1
+  -> signature/key/scope/epoch/fence admission
+  -> canonical apply (fact + inbox + stream head) in one transaction
+  -> durable typed ACK
+  -> watermark advances only on Applied/Duplicate
+```
+
+### Sender
+
+```bash
+mnemes-sync-client --db <store>/memory.db \
+  --home-device-id <DEVICE_ID> --store-id <STORE_ID> --stream-epoch N \
+  --key <32-byte-seed-file> --principal <PRINCIPAL_ID> --key-version 1 \
+  --fencing-token <TOKEN> --url http://127.0.0.1:<PORT> \
+  --credential-file <env-with-MNEME_CREDENTIAL> [--watermark <path>]
+```
+
+- One record per invocation; the caller (timer, hook, cron) decides cadence.
+- The watermark stores `next_sequence` (the next expected record) and is
+  written atomically only after a typed `Accepted` ACK — never on transport,
+  auth, admission, or parse errors. A restored/stale watermark replays the
+  last record and receives a durable `Duplicate` ACK with no second fact.
+- Generate a key with `mnemes-sync-client --gen-key <path>`; it prints the
+  verifying key hex to admit.
+- The verified canary sequence (journal row -> signed batch -> typed ACK ->
+  shard readback -> exact duplicate -> authority restart) is covered by
+  `tests/canonical_journal_fact_create_canary.rs` and the source-level
+  `semantic_memory::journal` contract tests.
 
 ---
 
