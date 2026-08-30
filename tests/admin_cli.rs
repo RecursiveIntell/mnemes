@@ -1,4 +1,6 @@
+use mnemes::{DeviceId, FactSupersedeAdmission, MnemesStore};
 use rusqlite::Connection;
+use semantic_memory::{MemoryConfig, MockEmbedder};
 use serde_json::Value;
 use std::process::Command;
 use tempfile::TempDir;
@@ -225,6 +227,94 @@ fn fact_create_revoke_cli_marks_existing_test_admission_revoked() {
         .query_row("SELECT revoked FROM fact_create_admissions", [], |row| {
             row.get(0)
         })
+        .unwrap();
+    assert_eq!(revoked, 1);
+}
+
+#[tokio::test]
+async fn fact_supersede_revoke_cli_marks_store_admission_revoked_without_key_material() {
+    let dir = TempDir::new().unwrap();
+    let bin = env!("CARGO_BIN_EXE_mnemes-admin");
+    let bootstrap = Command::new(bin)
+        .args([
+            "bootstrap",
+            dir.path().to_str().unwrap(),
+            "test",
+            "linux",
+            "host",
+        ])
+        .output()
+        .unwrap();
+    assert!(bootstrap.status.success());
+    let device_id = serde_json::from_slice::<Value>(&bootstrap.stdout).unwrap()["device_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let store = MnemesStore::open_with_embedder(
+        dir.path().to_path_buf(),
+        MemoryConfig {
+            base_dir: dir.path().to_path_buf(),
+            ..Default::default()
+        },
+        Box::new(MockEmbedder::new(768)),
+    )
+    .unwrap();
+    store
+        .admit_fact_supersede_key(FactSupersedeAdmission {
+            device_id: DeviceId::parse(&device_id).unwrap(),
+            store_id: "store-revoke".into(),
+            replacement_namespace: "ns-revoke".into(),
+            principal_id: "principal-revoke".into(),
+            key_version: 2,
+            public_key: [0xcd; 32],
+            activated_at: 0,
+            cutoff_at: 200,
+            store_epoch: 3,
+            writer_epoch: 4,
+            fencing_token: "fence-revoke".into(),
+        })
+        .await
+        .unwrap();
+    let revoked = Command::new(bin)
+        .args([
+            "fact-supersede-revoke",
+            dir.path().to_str().unwrap(),
+            &device_id,
+            "store-revoke",
+            "ns-revoke",
+            "principal-revoke",
+            "2",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        revoked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+    let output = String::from_utf8(revoked.stdout).unwrap();
+    let value: Value = serde_json::from_str(&output).unwrap();
+    assert_eq!(value["device_id"], device_id);
+    assert_eq!(value["replacement_namespace"], "ns-revoke");
+    assert_eq!(value["principal_id"], "principal-revoke");
+    assert_eq!(value["key_version"], 2);
+    assert!(value["revoked"].as_bool().unwrap());
+    assert!(!output.contains(&"cd".repeat(32)));
+    let conn = Connection::open(dir.path().join("pooled.db")).unwrap();
+    let revoked: i64 = conn
+        .query_row(
+            "SELECT revoked FROM fact_supersede_admissions \
+             WHERE device_id=?1 AND store_id=?2 AND replacement_namespace=?3 \
+               AND principal_id=?4 AND key_version=?5",
+            [
+                &device_id,
+                "store-revoke",
+                "ns-revoke",
+                "principal-revoke",
+                "2",
+            ],
+            |row| row.get(0),
+        )
         .unwrap();
     assert_eq!(revoked, 1);
 }

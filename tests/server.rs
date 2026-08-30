@@ -1,14 +1,25 @@
 use ed25519_dalek::SigningKey;
-use mnemes::replication::{FactCreateTransportEntryV1, SignedFactCreateBatchV1};
-use mnemes::server::{build_memory_store, build_router};
-use mnemes::{Device, DeviceId, FactCreateAdmission, MnemesStore};
+use mnemes::replication::{
+    FactCreateTransportEntryV1, FactSupersedeTransportEntryV1, SignedFactCreateBatchV1,
+    SignedFactSupersedeBatchV1,
+};
+use mnemes::server::{build_memory_store, build_router, build_staged_fact_supersede_router};
+use mnemes::{Device, DeviceId, FactCreateAdmission, FactSupersedeAdmission, MnemesStore};
 use reqwest::{Client, StatusCode};
 use semantic_memory::journal::{
-    encode_fact_create_payload, envelope_digest, payload_digest, FactCreatePayloadV1, JournalEntry,
-    FACT_CREATE_OPERATION, FACT_CREATE_PAYLOAD_SCHEMA, GENESIS_PREDECESSOR, VERIFIED_RECORD_STATE,
+    encode_fact_create_payload, envelope_digest, export_verified_contiguous, payload_digest,
+    FactCreatePayloadV1, FactCreateReplicaEnvelopeV1, FactSupersedePayloadV1,
+    FactSupersedeReplicaEnvelopeV1, JournalEntry, FACT_CREATE_OPERATION,
+    FACT_CREATE_PAYLOAD_SCHEMA, GENESIS_PREDECESSOR, VERIFIED_RECORD_STATE,
+};
+use semantic_memory::{
+    AssertionDraftV1, AuthorityIssuer, AuthorityPermit, MemoryConfig, MemoryStore,
+    MemoryTransitionCandidateV1, MemoryTransitionOutcomeV1, MockEmbedder, ReplicationMode,
+    SourceArtifactV1, SourceSpanRefV1, SupersessionDraftV1, TransitionOperation,
 };
 use serde_json::{json, Value};
 use std::path::PathBuf;
+use std::process::Command;
 use tempfile::TempDir;
 use tokio::task::JoinHandle;
 
@@ -79,6 +90,30 @@ async fn spawn_server() -> RunningServer {
 #[cfg(feature = "server")]
 async fn spawn_server_with_store(_temp: TempDir, store: MnemesStore) -> RunningServer {
     let app = build_router(store);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
+    let addr = listener.local_addr().unwrap();
+    let base_url = format!("http://{addr}");
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app)
+            .await
+            .unwrap_or_else(|error| panic!("server stopped: {error}"));
+    });
+
+    RunningServer {
+        base_url,
+        _temp_dir: _temp,
+        _handle: handle,
+    }
+}
+
+#[cfg(feature = "server")]
+async fn spawn_staged_fact_supersede_server_with_store(
+    _temp: TempDir,
+    store: MnemesStore,
+) -> RunningServer {
+    let app = build_staged_fact_supersede_router(store);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap();
@@ -202,6 +237,175 @@ fn fact_batch(
     (batch, key)
 }
 
+fn owner_candidate(
+    candidate_id: &str,
+    evidence: &str,
+    assertion_id: &str,
+    assertion: &str,
+    operation: TransitionOperation,
+) -> MemoryTransitionCandidateV1 {
+    let artifact_id = format!("artifact:{candidate_id}");
+    let span = SourceSpanRefV1::new(&artifact_id, 0, evidence.len()).unwrap();
+    MemoryTransitionCandidateV1::new(
+        candidate_id,
+        vec![SourceArtifactV1::new(&artifact_id, evidence).unwrap()],
+        vec![span.clone()],
+        vec![
+            AssertionDraftV1::new(assertion_id, "general", assertion, vec![span], vec![]).unwrap(),
+        ],
+        operation,
+        vec![],
+    )
+    .unwrap()
+}
+
+async fn owner_created_supersede_envelopes(
+    home_device_id: &str,
+) -> (FactCreateReplicaEnvelopeV1, FactSupersedeReplicaEnvelopeV1) {
+    let temp = TempDir::new().unwrap();
+    let primary = MemoryStore::open_with_embedder(
+        MemoryConfig {
+            base_dir: temp.path().to_path_buf(),
+            journal_device_id: Some(home_device_id.into()),
+            journal_store_id: Some("primary".into()),
+            replication_mode: ReplicationMode::FactCreateRequired,
+            replication_stream_epoch: 7,
+            ..Default::default()
+        },
+        Box::new(MockEmbedder::new(768)),
+    )
+    .unwrap();
+    let authority = primary.authority();
+    let old = authority
+        .verify_and_commit(
+            AuthorityIssuer::from_operator_token("server-test-operator-token")
+                .unwrap()
+                .mint_operator_system(
+                    "principal:test",
+                    "server-test",
+                    AuthorityPermit::APPEND_CAPABILITY,
+                ),
+            "server-owner-create".into(),
+            owner_candidate(
+                "server-owner-create-candidate",
+                "owner original",
+                "old",
+                "owner original",
+                TransitionOperation::Append {
+                    assertion_id: "old".into(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    let old_id = match old {
+        MemoryTransitionOutcomeV1::Committed {
+            authority_receipt, ..
+        } => authority_receipt.affected_ids[0].clone(),
+        _ => panic!("governed owner create must commit"),
+    };
+    authority
+        .verify_and_commit(
+            AuthorityIssuer::from_operator_token("server-test-operator-token")
+                .unwrap()
+                .mint_operator_system(
+                    "principal:test",
+                    "server-test",
+                    AuthorityPermit::SUPERSEDE_CAPABILITY,
+                ),
+            "server-owner-supersede".into(),
+            owner_candidate(
+                "server-owner-supersede-candidate",
+                "owner replacement",
+                "new",
+                "owner replacement",
+                TransitionOperation::Supersede {
+                    draft: SupersessionDraftV1::new(&old_id, "new").unwrap(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+    let conn = rusqlite::Connection::open(temp.path().join("memory.db")).unwrap();
+    let entries = export_verified_contiguous(&conn, home_device_id, "primary", 7, 1, 2)
+        .unwrap()
+        .entries;
+    assert_eq!(entries.len(), 2);
+    (
+        FactCreateReplicaEnvelopeV1::from(entries[0].clone()),
+        FactSupersedeReplicaEnvelopeV1::from(entries[1].clone()),
+    )
+}
+
+fn supersede_batch(
+    batch_id: &str,
+    owner_envelope: FactSupersedeReplicaEnvelopeV1,
+    writer_epoch: u64,
+    fence: &str,
+) -> (SignedFactSupersedeBatchV1, SigningKey) {
+    let key = SigningKey::from_bytes(&[8u8; 32]);
+    let mut batch = SignedFactSupersedeBatchV1::new(
+        batch_id,
+        owner_envelope.home_device_id.clone(),
+        owner_envelope.store_id.clone(),
+        3,
+        writer_epoch,
+        owner_envelope.stream_epoch,
+        owner_envelope.sequence,
+        vec![FactSupersedeTransportEntryV1::from_owner_envelope(
+            owner_envelope,
+        )],
+        "http-supersede-key",
+        1,
+        1_000,
+        fence,
+    )
+    .unwrap();
+    batch.sign(&key).unwrap();
+    (batch, key)
+}
+
+async fn post_supersede(
+    server: &RunningServer,
+    client: &Client,
+    device: &DeviceIdentity,
+    batch: &SignedFactSupersedeBatchV1,
+) -> (StatusCode, Value) {
+    let response = client
+        .post(format!(
+            "{}/v1/replication/fact-supersede/v1",
+            server.base_url
+        ))
+        .bearer_auth(&device.credential)
+        .json(batch)
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    (status, response.json().await.unwrap())
+}
+
+async fn admit_supersede(store: &MnemesStore, device_id: &str) {
+    store
+        .admit_fact_supersede_key(FactSupersedeAdmission {
+            device_id: DeviceId::parse(device_id).unwrap(),
+            store_id: "primary".into(),
+            replacement_namespace: "general".into(),
+            principal_id: "http-supersede-key".into(),
+            key_version: 1,
+            public_key: SigningKey::from_bytes(&[8u8; 32])
+                .verifying_key()
+                .to_bytes(),
+            activated_at: 0,
+            cutoff_at: i64::MAX as u64,
+            store_epoch: 3,
+            writer_epoch: 4,
+            fencing_token: "supersede-fence-4".into(),
+        })
+        .await
+        .unwrap();
+}
+
 async fn fact_count(store: &MnemesStore, device_id: &str) -> u64 {
     store
         .device_memory(&DeviceId::parse(device_id).unwrap())
@@ -211,6 +415,58 @@ async fn fact_count(store: &MnemesStore, device_id: &str) -> u64 {
         .await
         .unwrap()
         .total_facts as u64
+}
+
+#[cfg(feature = "server")]
+fn supersede_ack_count(temp: &TempDir, batch_id: &str) -> i64 {
+    let conn =
+        rusqlite::Connection::open(temp.path().join("pooled-store").join("pooled.db")).unwrap();
+    conn.query_row(
+        "SELECT COUNT(*) FROM fact_supersede_acks WHERE batch_id=?1",
+        [batch_id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+#[cfg(feature = "server")]
+fn supersede_inbox_next_sequence(temp: &TempDir, device_id: &str) -> i64 {
+    let conn = rusqlite::Connection::open(
+        temp.path()
+            .join("pooled-store")
+            .join("memory")
+            .join("shards")
+            .join(device_id)
+            .join("memory.db"),
+    )
+    .unwrap();
+    conn.query_row(
+        "SELECT next_sequence FROM replication_inbox_streams \
+         WHERE home_device_id=?1 AND store_id='primary'",
+        [device_id],
+        |row| row.get(0),
+    )
+    .unwrap()
+}
+
+#[cfg(feature = "server")]
+fn supersede_inbox_stream_count(temp: &TempDir, device_id: &str) -> i64 {
+    let conn = rusqlite::Connection::open(
+        temp.path()
+            .join("pooled-store")
+            .join("memory")
+            .join("shards")
+            .join(device_id)
+            .join("memory.db"),
+    )
+    .unwrap();
+    conn.query_row(
+        "SELECT COUNT(*) FROM replication_inbox_streams \
+         WHERE home_device_id=?1 AND store_id='primary'",
+        [device_id],
+        |row| row.get(0),
+    )
+    .unwrap()
 }
 
 async fn post_fact(
@@ -228,6 +484,40 @@ async fn post_fact(
         .unwrap();
     let status = response.status();
     (status, response.json().await.unwrap())
+}
+
+#[cfg(feature = "server")]
+async fn apply_owner_create_for_supersede(
+    server: &RunningServer,
+    client: &Client,
+    device: &DeviceIdentity,
+    create: &FactCreateReplicaEnvelopeV1,
+    batch_id: &str,
+) {
+    let mut batch = SignedFactCreateBatchV1::new(
+        batch_id,
+        device.device_id.clone(),
+        "primary",
+        7,
+        1,
+        vec![FactCreateTransportEntryV1 {
+            sequence: create.sequence,
+            payload: create.payload.clone(),
+            payload_digest: create.payload_digest,
+            predecessor_digest: create.predecessor_digest,
+            journal_envelope_digest: create.envelope_digest,
+        }],
+        "http-replication-key",
+        1,
+        1_000,
+        "fence-7",
+    )
+    .unwrap();
+    batch.sign(&SigningKey::from_bytes(&[7u8; 32])).unwrap();
+    assert_eq!(
+        post_fact(server, client, device, &batch).await.0,
+        StatusCode::OK
+    );
 }
 
 async fn spawn_admitted_server() -> (RunningServer, DeviceIdentity, MnemesStore) {
@@ -269,6 +559,57 @@ async fn spawn_admitted_server() -> (RunningServer, DeviceIdentity, MnemesStore)
     )
     .unwrap();
     let server = spawn_server_with_store(temp, store).await;
+    (
+        server,
+        DeviceIdentity {
+            device_id: registered.to_string(),
+            credential,
+        },
+        count_store,
+    )
+}
+
+#[cfg(feature = "server")]
+async fn spawn_admitted_staged_fact_supersede_server(
+) -> (RunningServer, DeviceIdentity, MnemesStore) {
+    let (temp, store) = open_store().await;
+    let device_id = DeviceId::new();
+    let (registered, credential) = store
+        .register_device_with_generated_credential(Device::new(
+            device_id.clone(),
+            "ci-device",
+            "linux",
+            "localhost",
+        ))
+        .await
+        .unwrap();
+    store
+        .admit_fact_create_key(FactCreateAdmission {
+            device_id: registered.clone(),
+            store_id: "primary".into(),
+            namespace: "general".into(),
+            principal_id: "http-replication-key".into(),
+            key_version: 1,
+            public_key: SigningKey::from_bytes(&[7u8; 32])
+                .verifying_key()
+                .to_bytes(),
+            activated_at: 0,
+            cutoff_at: i64::MAX as u64,
+            stream_epoch: 7,
+            fencing_token: "fence-7".into(),
+        })
+        .await
+        .unwrap();
+    let count_store = MnemesStore::open_with_embedder(
+        temp.path().join("pooled-store"),
+        semantic_memory::MemoryConfig {
+            base_dir: temp.path().to_path_buf(),
+            ..Default::default()
+        },
+        Box::new(semantic_memory::MockEmbedder::new(768)),
+    )
+    .unwrap();
+    let server = spawn_staged_fact_supersede_server_with_store(temp, store).await;
     (
         server,
         DeviceIdentity {
@@ -1392,4 +1733,327 @@ async fn fact_create_http_exact_retry_survives_real_store_reopen() {
     assert_eq!(retry_ack, ack);
     assert_eq!(fact_count(&reopened_count, &device.device_id).await, 1);
     server.stop().await;
+}
+
+#[cfg(feature = "server")]
+#[tokio::test]
+async fn default_router_quarantines_fact_supersede_before_semantic_mutation() {
+    let (server, device, count_store) = spawn_admitted_server().await;
+    let response = Client::new()
+        .post(format!(
+            "{}/v1/replication/fact-supersede/v1",
+            server.base_url
+        ))
+        .bearer_auth(&device.credential)
+        .body("{}")
+        .send()
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(fact_count(&count_store, &device.device_id).await, 0);
+    server.stop().await;
+}
+
+#[cfg(feature = "server")]
+#[tokio::test]
+async fn fact_supersede_http_applies_owner_export_then_returns_same_ack_on_retry() {
+    let (server, device, receiver) = spawn_admitted_staged_fact_supersede_server().await;
+    admit_supersede(&receiver, &device.device_id).await;
+    let client = Client::new();
+    let (create, supersede) = owner_created_supersede_envelopes(&device.device_id).await;
+    let create_entry = FactCreateTransportEntryV1 {
+        sequence: create.sequence,
+        payload: create.payload,
+        payload_digest: create.payload_digest,
+        predecessor_digest: create.predecessor_digest,
+        journal_envelope_digest: create.envelope_digest,
+    };
+    let mut create_batch = SignedFactCreateBatchV1::new(
+        "owner-create-for-supersede",
+        device.device_id.clone(),
+        "primary",
+        7,
+        1,
+        vec![create_entry],
+        "http-replication-key",
+        1,
+        1_000,
+        "fence-7",
+    )
+    .unwrap();
+    create_batch
+        .sign(&SigningKey::from_bytes(&[7u8; 32]))
+        .unwrap();
+    assert_eq!(
+        post_fact(&server, &client, &device, &create_batch).await.0,
+        StatusCode::OK
+    );
+    let (batch, _) = supersede_batch("owner-supersede-1", supersede, 4, "supersede-fence-4");
+    let (status, ack) = post_supersede(&server, &client, &device, &batch).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ack["disposition"], "accepted");
+    assert_eq!(fact_count(&receiver, &device.device_id).await, 2);
+    let (status, duplicate_ack) = post_supersede(&server, &client, &device, &batch).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(duplicate_ack, ack);
+    assert_eq!(fact_count(&receiver, &device.device_id).await, 2);
+    server.stop().await;
+}
+
+#[cfg(feature = "server")]
+#[tokio::test]
+async fn fact_supersede_http_rejects_key_revoked_via_admin_cli_without_semantic_change() {
+    let (temp, store) = open_store().await;
+    let data_dir = temp.path().join("pooled-store");
+    let device_id = DeviceId::new();
+    let (registered, credential) = store
+        .register_device_with_generated_credential(Device::new(
+            device_id,
+            "ci-device",
+            "linux",
+            "localhost",
+        ))
+        .await
+        .unwrap();
+    store
+        .admit_fact_supersede_key(FactSupersedeAdmission {
+            device_id: registered.clone(),
+            store_id: "primary".into(),
+            replacement_namespace: "general".into(),
+            principal_id: "http-supersede-key".into(),
+            key_version: 1,
+            public_key: SigningKey::from_bytes(&[8u8; 32])
+                .verifying_key()
+                .to_bytes(),
+            activated_at: 0,
+            cutoff_at: i64::MAX as u64,
+            store_epoch: 3,
+            writer_epoch: 4,
+            fencing_token: "supersede-fence-4".into(),
+        })
+        .await
+        .unwrap();
+    let revoked = Command::new(env!("CARGO_BIN_EXE_mnemes-admin"))
+        .args([
+            "fact-supersede-revoke",
+            data_dir.to_str().unwrap(),
+            registered.as_str(),
+            "primary",
+            "general",
+            "http-supersede-key",
+            "1",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        revoked.status.success(),
+        "{}",
+        String::from_utf8_lossy(&revoked.stderr)
+    );
+    let count_store = MnemesStore::open_with_embedder(
+        data_dir,
+        semantic_memory::MemoryConfig {
+            base_dir: temp.path().to_path_buf(),
+            ..Default::default()
+        },
+        Box::new(semantic_memory::MockEmbedder::new(768)),
+    )
+    .unwrap();
+    let server = spawn_staged_fact_supersede_server_with_store(temp, store).await;
+    let device = DeviceIdentity {
+        device_id: registered.to_string(),
+        credential,
+    };
+    let (_, supersede) = owner_created_supersede_envelopes(&device.device_id).await;
+    let (batch, _) = supersede_batch("supersede-revoked", supersede, 4, "supersede-fence-4");
+    assert_eq!(
+        post_supersede(&server, &Client::new(), &device, &batch)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(fact_count(&count_store, &device.device_id).await, 0);
+    let temp = server.stop_keep_temp().await;
+    assert_eq!(supersede_ack_count(&temp, "supersede-revoked"), 0);
+    assert_eq!(supersede_inbox_stream_count(&temp, &device.device_id), 0);
+}
+
+#[cfg(feature = "server")]
+#[tokio::test]
+async fn fact_supersede_http_refuses_collision_stale_predecessor_and_stale_writer_epoch() {
+    let (server, device, receiver) = spawn_admitted_staged_fact_supersede_server().await;
+    admit_supersede(&receiver, &device.device_id).await;
+    let client = Client::new();
+    let (create, supersede) = owner_created_supersede_envelopes(&device.device_id).await;
+    let create_entry = FactCreateTransportEntryV1 {
+        sequence: create.sequence,
+        payload: create.payload,
+        payload_digest: create.payload_digest,
+        predecessor_digest: create.predecessor_digest,
+        journal_envelope_digest: create.envelope_digest,
+    };
+    let mut create_batch = SignedFactCreateBatchV1::new(
+        "owner-create-for-refusal",
+        device.device_id.clone(),
+        "primary",
+        7,
+        1,
+        vec![create_entry],
+        "http-replication-key",
+        1,
+        1_000,
+        "fence-7",
+    )
+    .unwrap();
+    create_batch
+        .sign(&SigningKey::from_bytes(&[7u8; 32]))
+        .unwrap();
+    assert_eq!(
+        post_fact(&server, &client, &device, &create_batch).await.0,
+        StatusCode::OK
+    );
+
+    let (mut stale_writer, _) =
+        supersede_batch("writer-stale", supersede.clone(), 3, "supersede-fence-4");
+    stale_writer
+        .sign(&SigningKey::from_bytes(&[8u8; 32]))
+        .unwrap();
+    assert_eq!(
+        post_supersede(&server, &client, &device, &stale_writer)
+            .await
+            .0,
+        StatusCode::FORBIDDEN
+    );
+    assert_eq!(fact_count(&receiver, &device.device_id).await, 1);
+
+    let mut stale_envelope = supersede.clone();
+    let mut stale_payload: FactSupersedePayloadV1 =
+        serde_json::from_slice(&stale_envelope.payload).unwrap();
+    stale_payload.semantic_predecessor_digest = "0".repeat(64);
+    stale_envelope.payload = serde_json::to_vec(&stale_payload).unwrap();
+    stale_envelope.reseal();
+    let (stale, _) = supersede_batch("semantic-stale", stale_envelope, 4, "supersede-fence-4");
+    assert_eq!(
+        post_supersede(&server, &client, &device, &stale).await.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(fact_count(&receiver, &device.device_id).await, 1);
+
+    let (valid, key) = supersede_batch(
+        "owner-supersede-collision",
+        supersede,
+        4,
+        "supersede-fence-4",
+    );
+    assert_eq!(
+        post_supersede(&server, &client, &device, &valid).await.0,
+        StatusCode::OK
+    );
+    let mut collision = valid.clone();
+    collision.store_epoch = 9;
+    collision.sign(&key).unwrap();
+    assert_eq!(
+        post_supersede(&server, &client, &device, &collision)
+            .await
+            .0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(fact_count(&receiver, &device.device_id).await, 2);
+    let temp = server.stop_keep_temp().await;
+    assert_eq!(supersede_ack_count(&temp, "writer-stale"), 0);
+    assert_eq!(supersede_ack_count(&temp, "semantic-stale"), 0);
+    assert_eq!(supersede_inbox_next_sequence(&temp, &device.device_id), 3);
+}
+
+#[cfg(feature = "server")]
+#[tokio::test]
+async fn fact_supersede_http_reports_owner_stream_gap_as_conflict_without_ack() {
+    let (server, device, receiver) = spawn_admitted_staged_fact_supersede_server().await;
+    admit_supersede(&receiver, &device.device_id).await;
+    let client = Client::new();
+    let (create, mut supersede) = owner_created_supersede_envelopes(&device.device_id).await;
+    apply_owner_create_for_supersede(&server, &client, &device, &create, "owner-create-for-gap")
+        .await;
+    supersede.sequence = 3;
+    supersede.reseal();
+    let (batch, _) = supersede_batch("owner-supersede-gap", supersede, 4, "supersede-fence-4");
+    assert_eq!(
+        post_supersede(&server, &client, &device, &batch).await.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(fact_count(&receiver, &device.device_id).await, 1);
+    let temp = server.stop_keep_temp().await;
+    assert_eq!(supersede_ack_count(&temp, "owner-supersede-gap"), 0);
+    assert_eq!(supersede_inbox_next_sequence(&temp, &device.device_id), 2);
+}
+
+#[cfg(feature = "server")]
+#[tokio::test]
+async fn fact_supersede_http_reports_owner_epoch_conflict_without_ack() {
+    let (server, device, receiver) = spawn_admitted_staged_fact_supersede_server().await;
+    admit_supersede(&receiver, &device.device_id).await;
+    let client = Client::new();
+    let (create, mut supersede) = owner_created_supersede_envelopes(&device.device_id).await;
+    apply_owner_create_for_supersede(
+        &server,
+        &client,
+        &device,
+        &create,
+        "owner-create-for-epoch-conflict",
+    )
+    .await;
+    supersede.stream_epoch = 8;
+    supersede.reseal();
+    let (batch, _) = supersede_batch(
+        "owner-supersede-epoch-conflict",
+        supersede,
+        4,
+        "supersede-fence-4",
+    );
+    assert_eq!(
+        post_supersede(&server, &client, &device, &batch).await.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(fact_count(&receiver, &device.device_id).await, 1);
+    let temp = server.stop_keep_temp().await;
+    assert_eq!(
+        supersede_ack_count(&temp, "owner-supersede-epoch-conflict"),
+        0
+    );
+    assert_eq!(supersede_inbox_next_sequence(&temp, &device.device_id), 2);
+}
+
+#[cfg(feature = "server")]
+#[tokio::test]
+async fn fact_supersede_http_reports_changed_same_sequence_owner_envelope_as_conflict_without_ack()
+{
+    let (server, device, receiver) = spawn_admitted_staged_fact_supersede_server().await;
+    admit_supersede(&receiver, &device.device_id).await;
+    let client = Client::new();
+    let (create, supersede) = owner_created_supersede_envelopes(&device.device_id).await;
+    apply_owner_create_for_supersede(&server, &client, &device, &create, "owner-create-for-fork")
+        .await;
+    let (valid, _) = supersede_batch(
+        "owner-supersede-for-fork",
+        supersede.clone(),
+        4,
+        "supersede-fence-4",
+    );
+    assert_eq!(
+        post_supersede(&server, &client, &device, &valid).await.0,
+        StatusCode::OK
+    );
+    let mut changed = supersede;
+    changed.payload.push(b' ');
+    changed.reseal();
+    let (fork, _) = supersede_batch("owner-supersede-fork", changed, 4, "supersede-fence-4");
+    assert_eq!(
+        post_supersede(&server, &client, &device, &fork).await.0,
+        StatusCode::CONFLICT
+    );
+    assert_eq!(fact_count(&receiver, &device.device_id).await, 2);
+    let temp = server.stop_keep_temp().await;
+    assert_eq!(supersede_ack_count(&temp, "owner-supersede-fork"), 0);
+    assert_eq!(supersede_inbox_next_sequence(&temp, &device.device_id), 3);
 }

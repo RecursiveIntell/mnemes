@@ -10,6 +10,7 @@ fn usage() -> ! {
     );
     eprintln!("usage: mnemes-admin fact-create-admit <DATA_DIR> <DEVICE_ID> <STORE_ID> <NAMESPACE> <PRINCIPAL_ID> <KEY_VERSION> <PUBLIC_KEY_HEX_32_BYTES> <ACTIVATED_AT_UNIX_SECONDS> <CUTOFF_AT_UNIX_SECONDS> <STREAM_EPOCH> <FENCING_TOKEN>");
     eprintln!("usage: mnemes-admin fact-create-revoke <DATA_DIR> <DEVICE_ID> <STORE_ID> <NAMESPACE> <PRINCIPAL_ID> <KEY_VERSION>");
+    eprintln!("usage: mnemes-admin fact-supersede-revoke <DATA_DIR> <DEVICE_ID> <STORE_ID> <REPLACEMENT_NAMESPACE> <PRINCIPAL_ID> <KEY_VERSION>");
     std::process::exit(1);
 }
 
@@ -35,6 +36,7 @@ async fn main() {
         Some("bootstrap") => bootstrap(args).await,
         Some("fact-create-admit") => fact_create_admit(args).await,
         Some("fact-create-revoke") => fact_create_revoke(args).await,
+        Some("fact-supersede-revoke") => fact_supersede_revoke(args).await,
         _ => usage(),
     }
 }
@@ -109,6 +111,42 @@ async fn fact_create_revoke(args: Vec<String>) {
     println!(
         "{}",
         json!({"device_id": args[2], "store_id": args[3], "namespace": args[4], "principal_id": args[5], "key_version": key_version, "revoked": true})
+    );
+}
+
+async fn fact_supersede_revoke(args: Vec<String>) {
+    if args.len() != 7 {
+        usage();
+    }
+    let data_dir = PathBuf::from(&args[1]);
+    let device_id = DeviceId::parse(&args[2]).unwrap_or_else(|_| fail("invalid device_id"));
+    for (value, name) in [
+        (&args[3], "store_id"),
+        (&args[4], "replacement_namespace"),
+        (&args[5], "principal_id"),
+    ] {
+        if value.is_empty() {
+            fail(format!("empty {name}"));
+        }
+    }
+    let key_version = parse_u64(&args[6], "key_version");
+    if key_version == 0 {
+        fail("key_version must be nonzero");
+    }
+    let store = MnemesStore::open(
+        data_dir,
+        MemoryConfig {
+            ..Default::default()
+        },
+    )
+    .unwrap_or_else(|error| fail(format!("failed to open store\n{error}")));
+    store
+        .revoke_fact_supersede_key(&device_id, &args[3], &args[4], &args[5], key_version)
+        .await
+        .unwrap_or_else(|error| fail(format!("fact-supersede revocation failed\n{error}")));
+    println!(
+        "{}",
+        json!({"device_id": args[2], "store_id": args[3], "replacement_namespace": args[4], "principal_id": args[5], "key_version": key_version, "revoked": true})
     );
 }
 

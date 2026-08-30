@@ -12,12 +12,14 @@ use ed25519_dalek::{SigningKey, VerifyingKey};
 use mnemes::replication::{FactCreateTransportEntryV1, SignedFactCreateBatchV1};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
+use sha2::{Digest, Sha256};
 use std::fs;
 use std::io::Write;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
 
 const WIRE: &str = "/v1/replication/fact-create/v1";
+const ACK_PROTOCOL: &str = "mnemes.fact-create.v1";
 const OP_FACT_CREATE: &str = "fact.create";
 const SCHEMA_FACT_CREATE: &str = "semantic_memory.fact.create.v1";
 const RECORD_VERIFIED: &str = "verified_v1";
@@ -34,7 +36,7 @@ struct Watermark {
     updated_at: String,
 }
 
-#[derive(Deserialize, Debug)]
+#[derive(Deserialize, Debug, Clone)]
 struct Ack {
     protocol: String,
     batch_id: String,
@@ -62,6 +64,8 @@ impl std::error::Error for ClientError {}
 fn err<T>(m: impl Into<String>) -> Result<T, ClientError> {
     Err(ClientError::Msg(m.into()))
 }
+
+type JournalEntry = (i64, Vec<u8>, [u8; 32], [u8; 32], [u8; 32]);
 
 fn load_seed(path: &Path) -> Result<[u8; 32], ClientError> {
     let raw = fs::read_to_string(path).map_err(|e| ClientError::Msg(format!("key read: {e}")))?;
@@ -104,7 +108,7 @@ fn read_journal_entry(
     store: &str,
     epoch: u64,
     after_sequence: i64,
-) -> Result<Option<(i64, Vec<u8>, [u8; 32], [u8; 32], [u8; 32])>, ClientError> {
+) -> Result<Option<JournalEntry>, ClientError> {
     let mut stmt = conn
         .prepare(
             "SELECT sequence, payload, payload_digest, predecessor_digest, envelope_digest, \
@@ -115,24 +119,43 @@ fn read_journal_entry(
         )
         .map_err(|e| ClientError::Msg(format!("journal query: {e}")))?;
     let mut rows = stmt
-        .query(rusqlite::params![device, store, epoch as i64, after_sequence])
+        .query(rusqlite::params![
+            device,
+            store,
+            epoch as i64,
+            after_sequence
+        ])
         .map_err(|e| ClientError::Msg(format!("journal query: {e}")))?;
-    let Some(row) = rows.next().map_err(|e| ClientError::Msg(format!("row: {e}")))?
+    let Some(row) = rows
+        .next()
+        .map_err(|e| ClientError::Msg(format!("row: {e}")))?
     else {
         return Ok(None);
     };
-    let seq: i64 = row.get(0).map_err(|e| ClientError::Msg(format!("seq: {e}")))?;
-    let payload: Vec<u8> = row.get(1).map_err(|e| ClientError::Msg(format!("payload: {e}")))?;
-    let op: String = row.get(5).map_err(|e| ClientError::Msg(format!("op: {e}")))?;
-    let schema: String = row.get(6).map_err(|e| ClientError::Msg(format!("schema: {e}")))?;
-    let state: String = row.get(7).map_err(|e| ClientError::Msg(format!("state: {e}")))?;
+    let seq: i64 = row
+        .get(0)
+        .map_err(|e| ClientError::Msg(format!("seq: {e}")))?;
+    let payload: Vec<u8> = row
+        .get(1)
+        .map_err(|e| ClientError::Msg(format!("payload: {e}")))?;
+    let op: String = row
+        .get(5)
+        .map_err(|e| ClientError::Msg(format!("op: {e}")))?;
+    let schema: String = row
+        .get(6)
+        .map_err(|e| ClientError::Msg(format!("schema: {e}")))?;
+    let state: String = row
+        .get(7)
+        .map_err(|e| ClientError::Msg(format!("state: {e}")))?;
     if op != OP_FACT_CREATE || schema != SCHEMA_FACT_CREATE || state != RECORD_VERIFIED {
         return err(format!(
             "journal row {seq} is not a verified fact-create record (op={op}, schema={schema}, state={state})"
         ));
     }
     let d = |idx: usize| -> Result<[u8; 32], ClientError> {
-        let v: Vec<u8> = row.get(idx).map_err(|e| ClientError::Msg(format!("digest: {e}")))?;
+        let v: Vec<u8> = row
+            .get(idx)
+            .map_err(|e| ClientError::Msg(format!("digest: {e}")))?;
         let mut out = [0u8; 32];
         if v.len() != 32 {
             return err(format!("digest col {idx} length {}", v.len()));
@@ -143,7 +166,47 @@ fn read_journal_entry(
     let payload_digest = d(2)?;
     let predecessor_digest = d(3)?;
     let envelope_digest = d(4)?;
-    Ok(Some((seq, payload, payload_digest, predecessor_digest, envelope_digest)))
+    Ok(Some((
+        seq,
+        payload,
+        payload_digest,
+        predecessor_digest,
+        envelope_digest,
+    )))
+}
+
+fn validate_ack(
+    ack: &Ack,
+    body: &[u8],
+    batch_id: &str,
+    home_device_id: &str,
+    store_id: &str,
+    stream_epoch: u64,
+    submitted_sequence: i64,
+) -> Result<(), ClientError> {
+    if ack.protocol != ACK_PROTOCOL {
+        return err("ack protocol mismatch");
+    }
+    if ack.batch_id != batch_id {
+        return err("ack batch_id mismatch");
+    }
+    let expected_digest = format!("{:x}", Sha256::digest(body));
+    if ack.request_digest.as_deref() != Some(expected_digest.as_str()) {
+        return err("ack request digest mismatch");
+    }
+    if ack.home_device_id != home_device_id
+        || ack.store_id != store_id
+        || ack.stream_epoch != stream_epoch
+    {
+        return err("ack stream identity mismatch");
+    }
+    if ack.disposition != "accepted" {
+        return err(format!("unexpected disposition {}", ack.disposition));
+    }
+    if ack.accepted_head != submitted_sequence {
+        return err("ack accepted head mismatch");
+    }
+    Ok(())
 }
 
 fn write_watermark(path: &Path, wm: &Watermark) -> Result<(), ClientError> {
@@ -192,19 +255,58 @@ fn main() -> Result<(), ClientError> {
             })
         };
         match a {
-            "--db" => { db = Some(need(i)); i += 2; }
-            "--home-device-id" => { device = Some(need(i)); i += 2; }
-            "--store-id" => { store = Some(need(i)); i += 2; }
-            "--stream-epoch" => { epoch = need(i).parse().ok(); i += 2; }
-            "--key" => { key = Some(need(i)); i += 2; }
-            "--principal" => { principal = Some(need(i)); i += 2; }
-            "--key-version" => { key_version = need(i).parse().ok(); i += 2; }
-            "--fencing-token" => { fencing = Some(need(i)); i += 2; }
-            "--url" => { url = Some(need(i)); i += 2; }
-            "--credential-file" => { credential_env = Some(need(i)); i += 2; }
-            "--watermark" => { watermark = Some(PathBuf::from(need(i))); i += 2; }
-            "--observed-at" => { observed_at = need(i).parse().ok(); i += 2; }
-            "--gen-key" => { gen_key = Some(need(i)); i += 2; }
+            "--db" => {
+                db = Some(need(i));
+                i += 2;
+            }
+            "--home-device-id" => {
+                device = Some(need(i));
+                i += 2;
+            }
+            "--store-id" => {
+                store = Some(need(i));
+                i += 2;
+            }
+            "--stream-epoch" => {
+                epoch = need(i).parse().ok();
+                i += 2;
+            }
+            "--key" => {
+                key = Some(need(i));
+                i += 2;
+            }
+            "--principal" => {
+                principal = Some(need(i));
+                i += 2;
+            }
+            "--key-version" => {
+                key_version = need(i).parse().ok();
+                i += 2;
+            }
+            "--fencing-token" => {
+                fencing = Some(need(i));
+                i += 2;
+            }
+            "--url" => {
+                url = Some(need(i));
+                i += 2;
+            }
+            "--credential-file" => {
+                credential_env = Some(need(i));
+                i += 2;
+            }
+            "--watermark" => {
+                watermark = Some(PathBuf::from(need(i)));
+                i += 2;
+            }
+            "--observed-at" => {
+                observed_at = need(i).parse().ok();
+                i += 2;
+            }
+            "--gen-key" => {
+                gen_key = Some(need(i));
+                i += 2;
+            }
             h => {
                 println!("usage: mnemes-sync-client [--gen-key <path>] | [--db .. --home-device-id .. --store-id .. --stream-epoch N --key .. --principal .. --key-version N --fencing-token .. --url .. [--credential-file ..] [--watermark ..] [--observed-at N]]");
                 println!("unknown arg: {h}");
@@ -219,9 +321,9 @@ fn main() -> Result<(), ClientError> {
         rand::rngs::OsRng.fill_bytes(&mut seed);
         let sk = SigningKey::from_bytes(&seed);
         let vk: VerifyingKey = sk.verifying_key();
-        let mut f = fs::File::create(&kpath)
-            .map_err(|e| ClientError::Msg(format!("key write: {e}")))?;
-        f.write_all(hex::encode(&seed).as_bytes())
+        let mut f =
+            fs::File::create(&kpath).map_err(|e| ClientError::Msg(format!("key write: {e}")))?;
+        f.write_all(hex::encode(seed).as_bytes())
             .map_err(|e| ClientError::Msg(format!("key write: {e}")))?;
         fs::set_permissions(&kpath, fs::Permissions::from_mode(0o600))
             .map_err(|e| ClientError::Msg(format!("key chmod: {e}")))?;
@@ -238,9 +340,15 @@ fn main() -> Result<(), ClientError> {
     let key_version =
         key_version.ok_or_else(|| ClientError::Msg("--key-version required".into()))?;
     let fencing = fencing.ok_or_else(|| ClientError::Msg("--fencing-token required".into()))?;
-    let url = url.ok_or_else(|| ClientError::Msg("--url required".into()))?.trim_end_matches('/').to_string();
+    let url = url
+        .ok_or_else(|| ClientError::Msg("--url required".into()))?
+        .trim_end_matches('/')
+        .to_string();
     let credential_env = credential_env.unwrap_or_else(|| {
-        format!("{}/.config/mnemes/client.env", std::env::var("HOME").unwrap_or_default())
+        format!(
+            "{}/.config/mnemes/client.env",
+            std::env::var("HOME").unwrap_or_default()
+        )
     });
     let watermark = watermark.unwrap_or_else(|| {
         PathBuf::from(format!(
@@ -317,8 +425,8 @@ fn main() -> Result<(), ClientError> {
         .sign(&signing_key)
         .map_err(|e| ClientError::Msg(format!("sign: {e}")))?;
 
-    let body = serde_json::to_vec(&batch)
-        .map_err(|e| ClientError::Msg(format!("serialize: {e}")))?;
+    let body =
+        serde_json::to_vec(&batch).map_err(|e| ClientError::Msg(format!("serialize: {e}")))?;
 
     // async HTTP via tokio
     let ack: Ack = tokio::runtime::Runtime::new()
@@ -342,18 +450,11 @@ fn main() -> Result<(), ClientError> {
                 serde_json::from_str(&text)
                     .map_err(|e| ClientError::Msg(format!("ack parse: {e} — {text}")))
             } else {
-                Err(ClientError::Msg(format!(
-                    "HTTP {status}: {text}"
-                )))
+                Err(ClientError::Msg(format!("HTTP {status}: {text}")))
             }
         })?;
 
-    if ack.disposition != "accepted" {
-        return err(format!("unexpected disposition {}", ack.disposition));
-    }
-    if ack.batch_id != batch_id {
-        return err("ack batch_id mismatch");
-    }
+    validate_ack(&ack, &body, &batch_id, &device, &store, epoch, seq)?;
     let next_sequence = ack.accepted_head + 1;
     let wm2 = Watermark {
         next_sequence,
@@ -375,4 +476,49 @@ fn main() -> Result<(), ClientError> {
     });
     println!("{out}");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn ack_for(body: &[u8]) -> Ack {
+        Ack {
+            protocol: ACK_PROTOCOL.to_string(),
+            batch_id: "batch-1".to_string(),
+            request_digest: Some(format!("{:x}", Sha256::digest(body))),
+            home_device_id: "device-1".to_string(),
+            store_id: "store-1".to_string(),
+            stream_epoch: 7,
+            accepted_head: 11,
+            disposition: "accepted".to_string(),
+        }
+    }
+
+    fn validates(ack: &Ack, body: &[u8]) -> bool {
+        validate_ack(ack, body, "batch-1", "device-1", "store-1", 7, 11).is_ok()
+    }
+
+    #[test]
+    fn ack_validation_accepts_only_the_exact_request_and_stream() {
+        let body = b"exact-signed-request";
+        let ack = ack_for(body);
+        assert!(validates(&ack, body));
+
+        for mutate in [
+            |ack: &mut Ack| ack.protocol = "mnemes.fact-create.v0".to_string(),
+            |ack: &mut Ack| ack.batch_id = "other-batch".to_string(),
+            |ack: &mut Ack| ack.request_digest = Some("0".repeat(64)),
+            |ack: &mut Ack| ack.home_device_id = "other-device".to_string(),
+            |ack: &mut Ack| ack.store_id = "other-store".to_string(),
+            |ack: &mut Ack| ack.stream_epoch = 8,
+            |ack: &mut Ack| ack.accepted_head = 12,
+            |ack: &mut Ack| ack.disposition = "rejected".to_string(),
+        ] {
+            let mut altered = ack.clone();
+            mutate(&mut altered);
+            assert!(!validates(&altered, body));
+        }
+        assert!(!validates(&ack, b"different-request"));
+    }
 }
