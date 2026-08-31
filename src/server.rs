@@ -1,7 +1,8 @@
 #[cfg(feature = "server")]
 use crate::{
-    replication::SignedFactCreateBatchV1, Actor, ActorId, Device, DeviceId, MnemesError,
-    MnemesStore, OperationEnvelope, OperationId, OperationKind, ToolProfile,
+    replication::{SignedFactCreateBatchV1, SignedFactSupersedeBatchV1},
+    Actor, ActorId, Device, DeviceId, MnemesError, MnemesStore, OperationEnvelope, OperationId,
+    OperationKind, ToolProfile,
 };
 #[cfg(feature = "server")]
 use axum::{
@@ -384,6 +385,19 @@ pub fn build_router(store: MnemesStore) -> Router {
 }
 
 #[cfg(feature = "server")]
+/// Builds a router that explicitly stages the quarantined fact-supersede route.
+///
+/// This is intended for local integration tests and deliberate staging only; normal
+/// runtime router construction continues to leave this route unadvertised.
+pub fn build_staged_fact_supersede_router(store: MnemesStore) -> Router {
+    build_router_with_staged_fact_supersede(ServerState {
+        store: Arc::new(store),
+        server_id: Uuid::new_v4().to_string(),
+        run_pack_attestation_key: None,
+    })
+}
+
+#[cfg(feature = "server")]
 pub fn build_router_with_run_pack_attestation_key(store: MnemesStore, key: Vec<u8>) -> Router {
     build_router_with_state(ServerState {
         store: Arc::new(store),
@@ -394,7 +408,20 @@ pub fn build_router_with_run_pack_attestation_key(store: MnemesStore, key: Vec<u
 
 #[cfg(feature = "server")]
 fn build_router_with_state(state: ServerState) -> Router {
-    Router::new()
+    build_router_with_route_selection(state, false)
+}
+
+#[cfg(feature = "server")]
+fn build_router_with_staged_fact_supersede(state: ServerState) -> Router {
+    build_router_with_route_selection(state, true)
+}
+
+#[cfg(feature = "server")]
+fn build_router_with_route_selection(
+    state: ServerState,
+    include_staged_fact_supersede: bool,
+) -> Router {
+    let router = Router::new()
         .route("/livez", get(livez_handler))
         .route("/v1/health", get(health_handler))
         .route("/v1/livez", get(livez_handler))
@@ -430,7 +457,17 @@ fn build_router_with_state(state: ServerState) -> Router {
         .route("/v1/receipts/:receipt_id", get(get_receipt_handler))
         .route("/v1/audit/events", get(list_audit_events_handler))
         .route("/mcp", post(mcp_handler))
-        .route("/v1/mcp", post(mcp_handler))
+        .route("/v1/mcp", post(mcp_handler));
+    let router = if include_staged_fact_supersede {
+        router.route(
+            "/v1/replication/fact-supersede/v1",
+            post(fact_supersede_handler),
+        )
+    } else {
+        router
+    };
+
+    router
         .with_state(state)
         .layer(TimeoutLayer::with_status_code(
             StatusCode::REQUEST_TIMEOUT,
@@ -524,6 +561,104 @@ async fn fact_create_handler(
             home_device_id: ack.home_device_id,
             store_id: ack.store_id,
             stream_epoch: ack.stream_epoch,
+            accepted_head: ack.accepted_head,
+            disposition: ack.disposition,
+        }),
+    )
+        .into_response()
+}
+
+#[cfg(feature = "server")]
+#[derive(Serialize)]
+struct FactSupersedeAck {
+    protocol: &'static str,
+    batch_id: String,
+    request_digest: String,
+    home_device_id: String,
+    store_id: String,
+    owner_stream_epoch: u64,
+    accepted_head: i64,
+    disposition: String,
+}
+
+#[cfg(feature = "server")]
+async fn fact_supersede_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    body: Bytes,
+) -> Response {
+    let batch = match SignedFactSupersedeBatchV1::decode_json(&body) {
+        Ok(v) => v,
+        Err(_) => {
+            return (
+                StatusCode::BAD_REQUEST,
+                Json(ErrorResponse {
+                    error: "invalid fact-supersede envelope",
+                }),
+            )
+                .into_response();
+        }
+    };
+    let context = match authorize(&state, &headers, None).await {
+        Ok(v) => v,
+        Err(e) => return error_response(&e),
+    };
+    if batch.home_device_id != context.device.device_id.as_str() {
+        return (
+            StatusCode::FORBIDDEN,
+            Json(ErrorResponse {
+                error: "home device mismatch",
+            }),
+        )
+            .into_response();
+    }
+    let request_digest = format!("{:x}", Sha256::digest(&body));
+    let ack = match state
+        .store
+        .apply_fact_supersede_request(&batch, request_digest)
+        .await
+    {
+        Ok(ack) => ack,
+        Err(MnemesError::FactSupersedeSemanticConflict) => {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "fact-supersede conflict",
+                }),
+            )
+                .into_response();
+        }
+        Err(MnemesError::FactSupersedeRejected(reason))
+            if reason == "batch id digest collision" =>
+        {
+            return (
+                StatusCode::CONFLICT,
+                Json(ErrorResponse {
+                    error: "fact-supersede conflict",
+                }),
+            )
+                .into_response();
+        }
+        Err(MnemesError::FactSupersedeRejected(_)) => {
+            return (
+                StatusCode::FORBIDDEN,
+                Json(ErrorResponse {
+                    error: "fact-supersede admission rejected",
+                }),
+            )
+                .into_response();
+        }
+        Err(error) => return error_response(&error),
+    };
+    (
+        StatusCode::OK,
+        Json(FactSupersedeAck {
+            protocol: "mnemes.fact-supersede.v1",
+            batch_id: ack.batch_id,
+            request_digest: ack.request_digest,
+            home_device_id: ack.home_device_id,
+            store_id: ack.store_id,
+            owner_stream_epoch: ack.owner_stream_epoch,
             accepted_head: ack.accepted_head,
             disposition: ack.disposition,
         }),

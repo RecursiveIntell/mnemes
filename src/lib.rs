@@ -20,7 +20,10 @@ pub mod types;
 pub use error::MnemesError;
 pub use run_pack::RunPackEvidenceProjectionV1;
 pub use shards::*;
-pub use store::{FactCreateAckRecord, FactCreateAdmission, MnemesStore};
+pub use store::{
+    FactCreateAckRecord, FactCreateAdmission, FactSupersedeAckRecord, FactSupersedeAdmission,
+    MnemesStore,
+};
 pub use types::*;
 
 pub use semantic_memory;

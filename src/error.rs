@@ -54,6 +54,12 @@ pub enum MnemesError {
     #[error("fact-create admission rejected: {0}")]
     FactCreateRejected(String),
 
+    #[error("fact-supersede admission rejected: {0}")]
+    FactSupersedeRejected(String),
+
+    #[error("fact-supersede semantic conflict")]
+    FactSupersedeSemanticConflict,
+
     #[error("underlying memory error: {0}")]
     Memory(#[from] semantic_memory::MemoryError),
 }

@@ -2,7 +2,7 @@
 //! database and lazily opened device-owned `semantic_memory::MemoryStore` shards.
 
 use crate::error::MnemesError;
-use crate::replication::SignedFactCreateBatchV1;
+use crate::replication::{SignedFactCreateBatchV1, SignedFactSupersedeBatchV1};
 use crate::shards::*;
 use crate::types::*;
 use chrono::{DateTime, Utc};
@@ -25,6 +25,10 @@ use std::time::Instant;
 const DEFAULT_SHARD_CACHE_CAPACITY: usize = 4;
 const POOLED_SCHEMA_GENERATION: i64 = 1;
 const RECEIPT_AUTH_KEY_FILE: &str = ".routing-receipt-hmac.key";
+
+/// Raw Mnemes-owned supersession admission projection from the control plane.
+/// It deliberately excludes the owner semantic payload and stream state.
+type FactSupersedeAdmissionRow = (Vec<u8>, i64, i64, i64, i64, i64, String);
 
 /// Construct the process-wide embedder selected for the default server path.
 ///
@@ -384,9 +388,39 @@ pub struct FactCreateAckRecord {
     pub disposition: String,
 }
 
+/// Operator-provisioned admission for one replacement namespace in the
+/// supersession transport family.  This is deliberately independent of
+/// fact-create admissions and of the owner stream epoch.
+#[derive(Debug, Clone)]
+pub struct FactSupersedeAdmission {
+    pub device_id: DeviceId,
+    pub store_id: String,
+    pub replacement_namespace: String,
+    pub principal_id: String,
+    pub key_version: u64,
+    pub public_key: [u8; 32],
+    pub activated_at: u64,
+    pub cutoff_at: u64,
+    pub store_epoch: u64,
+    pub writer_epoch: u64,
+    pub fencing_token: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct FactSupersedeAckRecord {
+    pub batch_id: String,
+    pub request_digest: String,
+    pub home_device_id: String,
+    pub store_id: String,
+    pub owner_stream_epoch: u64,
+    pub accepted_head: i64,
+    pub disposition: String,
+}
+
 pub struct MnemesStore {
     pool_conn: tokio::sync::Mutex<rusqlite::Connection>,
     fact_create_gate: tokio::sync::Mutex<()>,
+    fact_supersede_gate: tokio::sync::Mutex<()>,
     base_dir: PathBuf,
     memory_config: semantic_memory::MemoryConfig,
     embedder: Arc<dyn semantic_memory::Embedder>,
@@ -472,6 +506,7 @@ impl MnemesStore {
         Ok(Self {
             pool_conn: tokio::sync::Mutex::new(conn),
             fact_create_gate: tokio::sync::Mutex::new(()),
+            fact_supersede_gate: tokio::sync::Mutex::new(()),
             base_dir,
             memory_config,
             embedder,
@@ -688,6 +723,32 @@ impl MnemesStore {
                 stream_epoch INTEGER NOT NULL,
                 accepted_head INTEGER NOT NULL,
                 disposition TEXT NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS fact_supersede_admissions (
+                device_id TEXT NOT NULL REFERENCES devices(device_id),
+                store_id TEXT NOT NULL,
+                replacement_namespace TEXT NOT NULL,
+                principal_id TEXT NOT NULL,
+                key_version INTEGER NOT NULL CHECK(key_version > 0),
+                public_key BLOB NOT NULL CHECK(length(public_key)=32),
+                activated_at INTEGER NOT NULL CHECK(activated_at >= 0),
+                cutoff_at INTEGER NOT NULL CHECK(cutoff_at >= activated_at),
+                revoked INTEGER NOT NULL DEFAULT 0 CHECK(revoked IN (0, 1)),
+                store_epoch INTEGER NOT NULL CHECK(store_epoch > 0),
+                writer_epoch INTEGER NOT NULL CHECK(writer_epoch > 0),
+                fencing_token TEXT NOT NULL,
+                PRIMARY KEY(device_id, store_id, replacement_namespace, principal_id, key_version)
+            );
+            CREATE INDEX IF NOT EXISTS idx_fact_supersede_admission_scope
+                ON fact_supersede_admissions(device_id, store_id, replacement_namespace);
+            CREATE TABLE IF NOT EXISTS fact_supersede_acks (
+                batch_id TEXT PRIMARY KEY,
+                request_digest TEXT NOT NULL,
+                home_device_id TEXT NOT NULL,
+                store_id TEXT NOT NULL,
+                owner_stream_epoch INTEGER NOT NULL,
+                accepted_head INTEGER NOT NULL,
+                disposition TEXT NOT NULL
             );",
         )?;
         for (table, columns) in [
@@ -715,6 +776,35 @@ impl MnemesStore {
                     "home_device_id",
                     "store_id",
                     "stream_epoch",
+                    "accepted_head",
+                    "disposition",
+                ],
+            ),
+            (
+                "fact_supersede_admissions",
+                &[
+                    "device_id",
+                    "store_id",
+                    "replacement_namespace",
+                    "principal_id",
+                    "key_version",
+                    "public_key",
+                    "activated_at",
+                    "cutoff_at",
+                    "revoked",
+                    "store_epoch",
+                    "writer_epoch",
+                    "fencing_token",
+                ],
+            ),
+            (
+                "fact_supersede_acks",
+                &[
+                    "batch_id",
+                    "request_digest",
+                    "home_device_id",
+                    "store_id",
+                    "owner_stream_epoch",
                     "accepted_head",
                     "disposition",
                 ],
@@ -1656,7 +1746,8 @@ impl MnemesStore {
             | semantic_memory::journal::ReplicaApplyOutcome::Duplicate { sequence } => sequence,
             semantic_memory::journal::ReplicaApplyOutcome::Fork { .. }
             | semantic_memory::journal::ReplicaApplyOutcome::Gap { .. }
-            | semantic_memory::journal::ReplicaApplyOutcome::EpochConflict { .. } => {
+            | semantic_memory::journal::ReplicaApplyOutcome::EpochConflict { .. }
+            | semantic_memory::journal::ReplicaApplyOutcome::StalePredecessor { .. } => {
                 return Err(MnemesError::FactCreateRejected("semantic conflict".into()));
             }
         };
@@ -1728,6 +1819,180 @@ impl MnemesStore {
     ) -> Result<(), MnemesError> {
         let conn = self.pool_conn.lock().await;
         conn.execute("INSERT INTO fact_create_acks (batch_id,request_digest,home_device_id,store_id,stream_epoch,accepted_head,disposition) VALUES (?1,?2,?3,?4,?5,?6,?7)", rusqlite::params![ack.batch_id,ack.request_digest,ack.home_device_id,ack.store_id,i64::try_from(ack.stream_epoch).map_err(|_| MnemesError::FactCreateRejected("stream epoch does not fit SQLite INTEGER".into()))?,ack.accepted_head,ack.disposition])?;
+        Ok(())
+    }
+
+    /// Local bootstrap-only admission API for the supersession family.
+    pub async fn admit_fact_supersede_key(
+        &self,
+        admission: FactSupersedeAdmission,
+    ) -> Result<(), MnemesError> {
+        let _gate = self.fact_supersede_gate.lock().await;
+        if admission.store_id.is_empty()
+            || admission.replacement_namespace.is_empty()
+            || admission.principal_id.is_empty()
+            || admission.fencing_token.is_empty()
+            || admission.key_version == 0
+            || admission.store_epoch == 0
+            || admission.writer_epoch == 0
+            || admission.activated_at > admission.cutoff_at
+        {
+            return Err(MnemesError::FactSupersedeRejected(
+                "invalid fact-supersede admission record".into(),
+            ));
+        }
+        let conn = self.pool_conn.lock().await;
+        conn.execute(
+            "INSERT INTO fact_supersede_admissions \
+             (device_id,store_id,replacement_namespace,principal_id,key_version,public_key,activated_at,cutoff_at,revoked,store_epoch,writer_epoch,fencing_token) \
+             VALUES (?1,?2,?3,?4,?5,?6,?7,?8,0,?9,?10,?11) \
+             ON CONFLICT(device_id,store_id,replacement_namespace,principal_id,key_version) DO UPDATE SET \
+             public_key=excluded.public_key,activated_at=excluded.activated_at,cutoff_at=excluded.cutoff_at,revoked=0,store_epoch=excluded.store_epoch,writer_epoch=excluded.writer_epoch,fencing_token=excluded.fencing_token",
+            rusqlite::params![
+                admission.device_id.as_str(), admission.store_id, admission.replacement_namespace,
+                admission.principal_id,
+                i64::try_from(admission.key_version).map_err(|_| MnemesError::FactSupersedeRejected("key version does not fit SQLite INTEGER".into()))?,
+                admission.public_key.as_slice(),
+                i64::try_from(admission.activated_at).map_err(|_| MnemesError::FactSupersedeRejected("activation time does not fit SQLite INTEGER".into()))?,
+                i64::try_from(admission.cutoff_at).map_err(|_| MnemesError::FactSupersedeRejected("cutoff time does not fit SQLite INTEGER".into()))?,
+                i64::try_from(admission.store_epoch).map_err(|_| MnemesError::FactSupersedeRejected("store epoch does not fit SQLite INTEGER".into()))?,
+                i64::try_from(admission.writer_epoch).map_err(|_| MnemesError::FactSupersedeRejected("writer epoch does not fit SQLite INTEGER".into()))?,
+                admission.fencing_token,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Revoke one exact supersession writer admission.
+    pub async fn revoke_fact_supersede_key(
+        &self,
+        device_id: &DeviceId,
+        store_id: &str,
+        replacement_namespace: &str,
+        principal_id: &str,
+        key_version: u64,
+    ) -> Result<(), MnemesError> {
+        let _gate = self.fact_supersede_gate.lock().await;
+        let conn = self.pool_conn.lock().await;
+        conn.execute(
+            "UPDATE fact_supersede_admissions SET revoked=1 WHERE device_id=?1 AND store_id=?2 AND replacement_namespace=?3 AND principal_id=?4 AND key_version=?5",
+            rusqlite::params![device_id.as_str(), store_id, replacement_namespace, principal_id, key_version as i64],
+        )?;
+        Ok(())
+    }
+
+    /// Atomically admit, apply, and acknowledge one owner-produced V1
+    /// supersession.  The gate is process-local only.
+    pub async fn apply_fact_supersede_request(
+        &self,
+        batch: &SignedFactSupersedeBatchV1,
+        request_digest: String,
+    ) -> Result<FactSupersedeAckRecord, MnemesError> {
+        let _gate = self.fact_supersede_gate.lock().await;
+        if let Some(existing) = self.get_fact_supersede_ack_locked(&batch.batch_id).await? {
+            if existing.request_digest != request_digest {
+                return Err(MnemesError::FactSupersedeRejected(
+                    "batch id digest collision".into(),
+                ));
+            }
+            return Ok(existing);
+        }
+        let envelope = batch
+            .semantic_envelope()
+            .map_err(|error| MnemesError::Replication(error.to_string()))?;
+        let replacement_namespace = batch
+            .replacement_namespace()
+            .map_err(|error| MnemesError::FactSupersedeRejected(error.to_string()))?;
+        self.check_fact_supersede_admission_locked(batch, &replacement_namespace)
+            .await?;
+        let memory = self
+            .device_memory(&DeviceId::parse(&batch.home_device_id)?)
+            .await?;
+        let decision = memory.apply_verified_fact_supersede(envelope).await?;
+        let accepted_head = match decision {
+            semantic_memory::journal::ReplicaApplyOutcome::Applied { sequence, .. }
+            | semantic_memory::journal::ReplicaApplyOutcome::Duplicate { sequence } => sequence,
+            semantic_memory::journal::ReplicaApplyOutcome::Fork { .. }
+            | semantic_memory::journal::ReplicaApplyOutcome::Gap { .. }
+            | semantic_memory::journal::ReplicaApplyOutcome::EpochConflict { .. }
+            | semantic_memory::journal::ReplicaApplyOutcome::StalePredecessor { .. } => {
+                return Err(MnemesError::FactSupersedeSemanticConflict);
+            }
+        };
+        let ack = FactSupersedeAckRecord {
+            batch_id: batch.batch_id.clone(),
+            request_digest,
+            home_device_id: batch.home_device_id.clone(),
+            store_id: batch.store_id.clone(),
+            owner_stream_epoch: batch.owner_stream_epoch,
+            accepted_head,
+            disposition: "accepted".into(),
+        };
+        self.persist_fact_supersede_ack_locked(&ack).await?;
+        Ok(ack)
+    }
+
+    async fn check_fact_supersede_admission_locked(
+        &self,
+        batch: &SignedFactSupersedeBatchV1,
+        replacement_namespace: &str,
+    ) -> Result<(), MnemesError> {
+        let device_id = DeviceId::parse(&batch.home_device_id)?;
+        let conn = self.pool_conn.lock().await;
+        let row: Option<FactSupersedeAdmissionRow> = conn.query_row(
+            "SELECT public_key,activated_at,cutoff_at,revoked,store_epoch,writer_epoch,fencing_token \
+             FROM fact_supersede_admissions WHERE device_id=?1 AND store_id=?2 AND replacement_namespace=?3 AND principal_id=?4 AND key_version=?5",
+            rusqlite::params![device_id.as_str(), batch.store_id, replacement_namespace, batch.signer_principal_id, batch.signer_key_version as i64],
+            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?, r.get(6)?)),
+        ).optional()?;
+        match row {
+            Some((pk, activated, cutoff, revoked, store_epoch, writer_epoch, fence))
+                if pk.as_slice() == batch.signer_public_key
+                    && revoked == 0
+                    && activated >= 0
+                    && cutoff >= activated
+                    && batch.observed_at >= activated as u64
+                    && batch.observed_at <= cutoff as u64
+                    && store_epoch == batch.store_epoch as i64
+                    && writer_epoch == batch.writer_epoch as i64
+                    && fence == batch.fencing_token =>
+            {
+                Ok(())
+            }
+            _ => Err(MnemesError::FactSupersedeRejected(
+                "key admission, lifecycle, replacement namespace, epoch, or fencing token rejected"
+                    .into(),
+            )),
+        }
+    }
+
+    async fn get_fact_supersede_ack_locked(
+        &self,
+        batch_id: &str,
+    ) -> Result<Option<FactSupersedeAckRecord>, MnemesError> {
+        let conn = self.pool_conn.lock().await;
+        Ok(conn.query_row(
+            "SELECT batch_id,request_digest,home_device_id,store_id,owner_stream_epoch,accepted_head,disposition FROM fact_supersede_acks WHERE batch_id=?1",
+            [batch_id],
+            |r| Ok(FactSupersedeAckRecord {
+                batch_id: r.get(0)?, request_digest: r.get(1)?, home_device_id: r.get(2)?, store_id: r.get(3)?,
+                owner_stream_epoch: u64::try_from(r.get::<_, i64>(4)?).map_err(|_| rusqlite::Error::IntegralValueOutOfRange(4, 0))?,
+                accepted_head: r.get(5)?, disposition: r.get(6)?,
+            }),
+        ).optional()?)
+    }
+
+    async fn persist_fact_supersede_ack_locked(
+        &self,
+        ack: &FactSupersedeAckRecord,
+    ) -> Result<(), MnemesError> {
+        let conn = self.pool_conn.lock().await;
+        conn.execute(
+            "INSERT INTO fact_supersede_acks (batch_id,request_digest,home_device_id,store_id,owner_stream_epoch,accepted_head,disposition) VALUES (?1,?2,?3,?4,?5,?6,?7)",
+            rusqlite::params![ack.batch_id, ack.request_digest, ack.home_device_id, ack.store_id,
+                i64::try_from(ack.owner_stream_epoch).map_err(|_| MnemesError::FactSupersedeRejected("owner stream epoch does not fit SQLite INTEGER".into()))?,
+                ack.accepted_head, ack.disposition],
+        )?;
         Ok(())
     }
 
