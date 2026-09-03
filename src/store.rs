@@ -1908,7 +1908,15 @@ impl MnemesStore {
         let memory = self
             .device_memory(&DeviceId::parse(&batch.home_device_id)?)
             .await?;
-        let decision = memory.apply_verified_fact_supersede(envelope).await?;
+        let decision = match memory.apply_verified_fact_supersede(envelope).await {
+            Ok(decision) => decision,
+            Err(semantic_memory::MemoryError::CorruptData { detail, .. })
+                if detail == "fact-supersede semantic lineage digest mismatch" =>
+            {
+                return Err(MnemesError::FactSupersedeSemanticConflict);
+            }
+            Err(error) => return Err(error.into()),
+        };
         let accepted_head = match decision {
             semantic_memory::journal::ReplicaApplyOutcome::Applied { sequence, .. }
             | semantic_memory::journal::ReplicaApplyOutcome::Duplicate { sequence } => sequence,

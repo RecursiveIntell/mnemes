@@ -1934,12 +1934,16 @@ async fn fact_supersede_http_refuses_collision_stale_predecessor_and_stale_write
     stale_envelope.payload = serde_json::to_vec(&stale_payload).unwrap();
     stale_envelope.reseal();
     let (stale, _) = supersede_batch("semantic-stale", stale_envelope, 4, "supersede-fence-4");
+    let (stale_status, stale_body) = post_supersede(&server, &client, &device, &stale).await;
+    assert_eq!(stale_status, StatusCode::CONFLICT);
     assert_eq!(
-        post_supersede(&server, &client, &device, &stale).await.0,
-        StatusCode::CONFLICT
+        stale_body["error"],
+        Value::String("fact-supersede conflict".into())
     );
     assert_eq!(fact_count(&receiver, &device.device_id).await, 1);
 
+    let mut terminal_stale = supersede.clone();
+    let accepted_owner_head = supersede.envelope_digest;
     let (valid, key) = supersede_batch(
         "owner-supersede-collision",
         supersede,
@@ -1950,6 +1954,24 @@ async fn fact_supersede_http_refuses_collision_stale_predecessor_and_stale_write
         post_supersede(&server, &client, &device, &valid).await.0,
         StatusCode::OK
     );
+    terminal_stale.sequence = 3;
+    terminal_stale.predecessor_digest = accepted_owner_head;
+    terminal_stale.reseal();
+    let (terminal_stale, _) = supersede_batch(
+        "semantic-stale-replay",
+        terminal_stale,
+        4,
+        "supersede-fence-4",
+    );
+    for _ in 0..2 {
+        let (status, body) = post_supersede(&server, &client, &device, &terminal_stale).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(
+            body["error"],
+            Value::String("fact-supersede conflict".into()),
+            "an exact stale replay must remain a conflict"
+        );
+    }
     let mut collision = valid.clone();
     collision.store_epoch = 9;
     collision.sign(&key).unwrap();
@@ -1963,6 +1985,7 @@ async fn fact_supersede_http_refuses_collision_stale_predecessor_and_stale_write
     let temp = server.stop_keep_temp().await;
     assert_eq!(supersede_ack_count(&temp, "writer-stale"), 0);
     assert_eq!(supersede_ack_count(&temp, "semantic-stale"), 0);
+    assert_eq!(supersede_ack_count(&temp, "semantic-stale-replay"), 0);
     assert_eq!(supersede_inbox_next_sequence(&temp, &device.device_id), 3);
 }
 
