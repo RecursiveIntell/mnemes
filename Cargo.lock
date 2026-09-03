@@ -280,9 +280,12 @@ checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
 [[package]]
 name = "bitemporal-runtime"
 version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6c22fb27959e206a4e7054975012dfa02199ccc29c4a4392ec8831737b241533"
 dependencies = [
  "chrono",
  "serde",
+ "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.19",
 ]
@@ -358,9 +361,12 @@ dependencies = [
 
 [[package]]
 name = "boundary-compiler"
-version = "0.1.0"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2763d0be3a169fb7da4e1fba27fd2d6a54c1e5e18f1ad59bf2fb8ef8b201285"
 dependencies = [
  "blake3",
+ "ryu-js",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -560,7 +566,7 @@ version = "3.1.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "faf9468729b8cbcea668e36183cb69d317348c2e08e994829fb56ebfdfbaac34"
 dependencies = [
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -1219,6 +1225,8 @@ checksum = "00b0228411908ca8685dba7fc2cdd70ec9990a6e753e89b6ac91a84c40fbaf4b"
 [[package]]
 name = "forge-memory-bridge"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d42ebee87700663d5647fa1637d69cfeca68e76cfa74eecd13679126517b6248"
 dependencies = [
  "chrono",
  "schemars",
@@ -3306,7 +3314,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -3338,6 +3346,12 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "ryu-js"
+version = "1.0.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "04d056b875a9d2e6cb9a61d127afee9ac5999b9f87bcb32079d1318e505be714"
 
 [[package]]
 name = "safe-transmute"
@@ -3430,6 +3444,8 @@ dependencies = [
 [[package]]
 name = "semantic-memory"
 version = "0.5.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a661a4c2371760ca5b358e4a1a87cd5b959cd16118a770995f73e8b142970edc"
 dependencies = [
  "bitemporal-runtime",
  "blake3",
@@ -3461,6 +3477,8 @@ dependencies = [
 [[package]]
 name = "semantic-memory-forge"
 version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "784b92a931e1060f99a6f5381a50a7a3658500b4a015210e44b575b32a979a4c"
 dependencies = [
  "chrono",
  "schemars",
@@ -3707,6 +3725,8 @@ checksum = "6ce2be8dc25455e1f91df71bfa12ad37d7af1092ae736f3a6cd0e37bc7810596"
 [[package]]
 name = "stack-ids"
 version = "0.1.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e0878cf4a0cec2fe5661b8606642287401eee5448182372317e1bdabeccf8500"
 dependencies = [
  "blake3",
  "chrono",
