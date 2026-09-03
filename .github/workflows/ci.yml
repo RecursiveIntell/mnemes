@@ -48,4 +48,9 @@ jobs:
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
         working-directory: mnemes
-        run: cargo test --all-features --verbose
+        # The default candle embedder eagerly downloads ~547 MB from
+        # HuggingFace on first use; HF rate-limits the shared runner IP
+        # pool, so CLI tests fail with 'failed to download config.json:
+        # Rate limited'. These tests exercise CLI plumbing, not embedding
+        # quality, so run them with the deterministic offline embedder.
+        run: MNEMES_EMBEDDER=mock cargo test --all-features --verbose

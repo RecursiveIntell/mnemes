@@ -63,8 +63,16 @@ fn configured_embedder(
         "ollama" | "http" => Ok(Box::new(semantic_memory::OllamaEmbedder::try_new(
             &memory_config.embedding,
         )?)),
+        // Testing only: a deterministic embedder that never touches the
+        // network. The candle default eagerly downloads ~547 MB from
+        // HuggingFace on first use, which CI runners cannot do reliably —
+        // HF rate-limits the shared runner IP pool and six parallel CLI
+        // tests fail on 'failed to download config.json: Rate limited'.
+        "mock" => Ok(Box::new(semantic_memory::MockEmbedder::new(
+            memory_config.embedding.dimensions,
+        ))),
         other => Err(MnemesError::InvalidShardCatalog(format!(
-            "unsupported MNEMES_EMBEDDER provider `{other}`; use candle, ollama, or open_with_embedder"
+            "unsupported MNEMES_EMBEDDER provider `{other}`; use candle, ollama, mock, or open_with_embedder"
         ))),
     }
 }
