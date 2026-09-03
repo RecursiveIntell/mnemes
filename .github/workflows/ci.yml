@@ -8,19 +8,44 @@ on:
 
 env:
   CARGO_TERM_COLOR: always
+  # The revision of RecursiveIntell/Libraries that mnemes builds against.
+  # Bump deliberately: it is the semantic-memory source of truth for this
+  # crate until a published release carries the journal supersede API.
+  LIBRARIES_REF: 3126252feb039e1577931437594115409374f360
 
 jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout mnemes
+        uses: actions/checkout@v4
+        with:
+          path: mnemes
+      # mnemes declares `semantic-memory = { path = "../Libraries/semantic-memory" }`.
+      # That sibling only exists in a local side-by-side checkout, so a plain
+      # checkout failed to read the manifest before compiling anything. Place
+      # Libraries next to mnemes on the pinned ref to restore the path dep
+      # without changing which source is built.
+      - name: Checkout Libraries (semantic-memory path dependency)
+        uses: actions/checkout@v4
+        with:
+          repository: RecursiveIntell/Libraries
+          ref: ${{ env.LIBRARIES_REF }}
+          path: Libraries
       - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: mnemes -> target
       - name: Install system dependencies
         run: sudo apt-get update && sudo apt-get install -y libsqlite3-dev
       - name: Format check
+        working-directory: mnemes
         run: cargo fmt --all -- --check
       - name: Clippy
+        working-directory: mnemes
         run: cargo clippy --all-targets --all-features -- -D warnings
       - name: Test
+        working-directory: mnemes
         run: cargo test --all-features --verbose

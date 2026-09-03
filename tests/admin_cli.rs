@@ -3,10 +3,42 @@ use rusqlite::Connection;
 use semantic_memory::{MemoryConfig, MockEmbedder};
 use serde_json::Value;
 use std::process::Command;
+use std::sync::{Mutex, MutexGuard};
 use tempfile::TempDir;
+
+/// The CLI tests below spawn the real `mnemes-admin` binary. Each one
+/// initializes its own SQLite store plus key material, and running them
+/// concurrently on a loaded or cold-cache machine starves those inits:
+/// `bootstrap` exits non-zero intermittently and the bare
+/// `assert!(status.success())` reports only the exit code, which is how
+/// this arrived as an unexplained CI failure (mnemes PR #3, run
+/// 33723242946). Serialize them behind one process-wide lock.
+static CLI_SERIAL: Mutex<()> = Mutex::new(());
+
+fn cli_serial() -> MutexGuard<'static, ()> {
+    // A poisoned lock means some other test panicked while holding it.
+    // The serialization guarantee still holds, so recover rather than
+    // cascade a confusing poisoning panic across unrelated tests.
+    CLI_SERIAL
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+}
+
+/// Run a CLI invocation and assert success, printing stdout/stderr on
+/// failure so a non-zero exit is diagnosable from the CI log.
+fn assert_cli_ok(output: &std::process::Output, what: &str) {
+    assert!(
+        output.status.success(),
+        "{what} failed with {:?}\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        output.status.code(),
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
 
 #[test]
 fn bootstrap_cli_accepts_documented_arguments_and_rejects_second_bootstrap() {
+    let _serial = cli_serial();
     let dir = TempDir::new().unwrap();
     let bin = env!("CARGO_BIN_EXE_mnemes-admin");
 
@@ -48,6 +80,7 @@ fn bootstrap_cli_accepts_documented_arguments_and_rejects_second_bootstrap() {
 
 #[test]
 fn fact_create_admit_cli_persists_public_key_without_echoing_it() {
+    let _serial = cli_serial();
     let dir = TempDir::new().unwrap();
     let bin = env!("CARGO_BIN_EXE_mnemes-admin");
     let bootstrap = Command::new(bin)
@@ -60,7 +93,7 @@ fn fact_create_admit_cli_persists_public_key_without_echoing_it() {
         ])
         .output()
         .unwrap();
-    assert!(bootstrap.status.success());
+    assert_cli_ok(&bootstrap, "bootstrap");
     let device_id = serde_json::from_slice::<Value>(&bootstrap.stdout).unwrap()["device_id"]
         .as_str()
         .unwrap()
@@ -117,6 +150,7 @@ fn fact_create_admit_cli_persists_public_key_without_echoing_it() {
 
 #[test]
 fn fact_create_admit_cli_rejects_invalid_key_before_store_open() {
+    let _serial = cli_serial();
     let dir = TempDir::new().unwrap();
     let valid_device_id = "11111111-1111-4111-8111-111111111111";
     let output = Command::new(env!("CARGO_BIN_EXE_mnemes-admin"))
@@ -164,6 +198,7 @@ fn fact_create_admit_cli_rejects_invalid_key_before_store_open() {
 
 #[test]
 fn fact_create_revoke_cli_marks_existing_test_admission_revoked() {
+    let _serial = cli_serial();
     let dir = TempDir::new().unwrap();
     let bin = env!("CARGO_BIN_EXE_mnemes-admin");
     let bootstrap = Command::new(bin)
@@ -176,7 +211,7 @@ fn fact_create_revoke_cli_marks_existing_test_admission_revoked() {
         ])
         .output()
         .unwrap();
-    assert!(bootstrap.status.success());
+    assert_cli_ok(&bootstrap, "bootstrap");
     let device_id = serde_json::from_slice::<Value>(&bootstrap.stdout).unwrap()["device_id"]
         .as_str()
         .unwrap()
@@ -198,7 +233,7 @@ fn fact_create_revoke_cli_marks_existing_test_admission_revoked() {
         ])
         .output()
         .unwrap();
-    assert!(admitted.status.success());
+    assert_cli_ok(&admitted, "admitted");
     let revoked = Command::new(bin)
         .args([
             "fact-create-revoke",
@@ -235,21 +270,28 @@ fn fact_create_revoke_cli_marks_existing_test_admission_revoked() {
 async fn fact_supersede_revoke_cli_marks_store_admission_revoked_without_key_material() {
     let dir = TempDir::new().unwrap();
     let bin = env!("CARGO_BIN_EXE_mnemes-admin");
-    let bootstrap = Command::new(bin)
-        .args([
-            "bootstrap",
-            dir.path().to_str().unwrap(),
-            "test",
-            "linux",
-            "host",
-        ])
-        .output()
-        .unwrap();
-    assert!(bootstrap.status.success());
-    let device_id = serde_json::from_slice::<Value>(&bootstrap.stdout).unwrap()["device_id"]
-        .as_str()
-        .unwrap()
-        .to_owned();
+    // Scoped so the guard is dropped before the first await below: clippy
+    // rejects a std MutexGuard held across an await point
+    // (clippy::await_holding_lock), and the guarded work here is only the
+    // synchronous CLI spawn.
+    let device_id = {
+        let _serial = cli_serial();
+        let bootstrap = Command::new(bin)
+            .args([
+                "bootstrap",
+                dir.path().to_str().unwrap(),
+                "test",
+                "linux",
+                "host",
+            ])
+            .output()
+            .unwrap();
+        assert_cli_ok(&bootstrap, "bootstrap");
+        serde_json::from_slice::<Value>(&bootstrap.stdout).unwrap()["device_id"]
+            .as_str()
+            .unwrap()
+            .to_owned()
+    };
     let store = MnemesStore::open_with_embedder(
         dir.path().to_path_buf(),
         MemoryConfig {
@@ -321,6 +363,7 @@ async fn fact_supersede_revoke_cli_marks_store_admission_revoked_without_key_mat
 
 #[test]
 fn bootstrap_cli_accepts_default_actor_kind() {
+    let _serial = cli_serial();
     let dir = TempDir::new().unwrap();
     let output = Command::new(env!("CARGO_BIN_EXE_mnemes-admin"))
         .args([

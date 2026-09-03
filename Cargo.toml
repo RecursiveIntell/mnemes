@@ -25,8 +25,12 @@ candle-local = ["semantic-memory/candle-embedder"]
 matryoshka = ["semantic-memory/matryoshka"]
 
 [dependencies]
-# Temporary local integration pin; release must use a published, semver-pinned V38/V39 artifact.
-semantic-memory = { version = "0.5.14", path = "../Libraries/semantic-memory", default-features = false, features = ["hnsw"] }
+# Sibling path dependency. The journal supersede surface mnemes builds against
+# (ReplicaApplyOutcome::StalePredecessor, apply_verified_fact_supersede) is not
+# in any published semantic-memory release, so this cannot yet move to a
+# crates.io pin. CI checks out RecursiveIntell/Libraries alongside this repo
+# (see .github/workflows/ci.yml, LIBRARIES_REF) so the path resolves there.
+semantic-memory = { version = "0.5.15", path = "../Libraries/semantic-memory", default-features = false, features = ["hnsw"] }
 rusqlite = { version = "0.32", features = ["bundled", "blob"] }
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "sync", "net"] }
 serde = { version = "1", features = ["derive"] }
