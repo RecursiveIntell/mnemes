@@ -15,6 +15,12 @@ pub enum MnemesError {
     #[error("authorization denied: {0}")]
     AuthorizationDenied(String),
 
+    #[error("invalid memory scope: {0}")]
+    InvalidMemoryScope(String),
+
+    #[error("memory grant denied: {0}")]
+    MemoryGrantDenied(String),
+
     #[error("bootstrap rejected: {0}")]
     BootstrapRejected(String),
 
