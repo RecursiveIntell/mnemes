@@ -1,6 +1,6 @@
 # Runtime Federation Binding — Detailed Implementation Plan
 
-**Status:** Plan complete; implementation intentionally not started
+**Status:** Plan complete; runtime federation implementation intentionally not started; locally implemented control-plane contract at `0abac8446f6c2aa4630aa10088d58b17f22ab1ac`
 **Plan owner:** Mnemes source owner (`RecursiveIntell/mnemes`)
 **Evidence cutoff:** 2026-09-10T20:18:47Z
 **Source snapshot:** implementation commit `0abac8446f6c2aa4630aa10088d58b17f22ab1ac`; plan reviewed and committed at candidate head `a10ba56e9e21bf4d2f2d81eeb7840c93948508b6`
@@ -39,7 +39,7 @@ Observed in the isolated source snapshot:
 - `src/profile_store.rs` now owns `MemoryProfileId`, `MemoryProfile`, `MemoryStoreIdentity`, `MemoryAccessGrant`, lifecycle states, bounded effects/time windows, and the pure deterministic authorizer.
 - `src/store.rs` owns the `pooled.db` schema and currently persists `memory_profiles`, `memory_stores`, and `memory_access_grants`.
 - Profile/store registration checks active device ownership and path safety.
-- Grant issuance requires an active operator actor and checks target/grantee lifecycle.
+- Grant issuance checks that the referenced persisted issuer is an active actor with the operator tool profile; authenticated request-context binding remains a later integration gate.
 - Authorization checks requester profile, requester device, target store, target owner profile/device, namespace, effect, validity interval, and revocation.
 - Behavioral coverage exists for explicit-grant denial, effect/namespace/time bounds, profile-subject mismatch, path traversal, revoked store/profile/device, and operator-only issuance.
 - `src/server.rs:696-704` authenticates a bearer device credential and optional actor ID, returning a `ServerContext` containing device and actor. It does not resolve a memory profile.
@@ -707,7 +707,7 @@ Revisit this plan when any of the following changes:
 Until then, the strongest supportable state is:
 
 ```text
-Mnemes profile/store/grant control-plane contract: locally implemented and tested.
+Mnemes profile/store/grant control-plane contract: locally implemented; test evidence is recorded in the candidate closeout and must be rerun against the exact publication head.
 Runtime profile-bound federation: planned, not active.
 Remote federation: not admitted.
 Production readiness: not claimed.
