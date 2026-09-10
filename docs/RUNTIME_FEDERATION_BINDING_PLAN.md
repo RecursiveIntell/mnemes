@@ -3,7 +3,7 @@
 **Status:** Plan complete; runtime federation implementation intentionally not started; locally implemented control-plane contract at `0abac8446f6c2aa4630aa10088d58b17f22ab1ac`
 **Plan owner:** Mnemes source owner (`RecursiveIntell/mnemes`)
 **Evidence cutoff:** 2026-09-10T20:18:47Z
-**Source snapshot:** implementation commit `0abac8446f6c2aa4630aa10088d58b17f22ab1ac`; plan reviewed and committed at candidate head `a10ba56e9e21bf4d2f2d81eeb7840c93948508b6`
+**Source snapshot:** implementation commit `0abac8446f6c2aa4630aa10088d58b17f22ab1ac`; the exact current publication candidate is recorded by the bounded publication receipt, not inferred from this evolving plan document.
 **Plan artifact:** `docs/RUNTIME_FEDERATION_BINDING_PLAN.md`
 
 > **Hard exclusion:** The actual `NousResearch/hermes-agent` repository and PR #94878 are not part of this plan's mutation scope. No source, branch, PR body, comment, merge, or other external state in that repository may be changed by this workstream.
