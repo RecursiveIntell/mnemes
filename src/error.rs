@@ -21,6 +21,12 @@ pub enum MnemesError {
     #[error("memory grant denied: {0}")]
     MemoryGrantDenied(String),
 
+    #[error("actor profile binding denied: {0}")]
+    ActorProfileBindingDenied(String),
+
+    #[error("authorization snapshot is stale or invalid: {0}")]
+    AuthorizationSnapshotInvalid(String),
+
     #[error("bootstrap rejected: {0}")]
     BootstrapRejected(String),
 
