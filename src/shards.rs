@@ -1,6 +1,6 @@
 //! Device-shard catalog types plus deterministic routing and merge helpers.
 
-use crate::{DeviceId, DeviceStatus, MnemesError};
+use crate::{ActorId, AuthorizedMemoryStore, DeviceId, DeviceStatus, MemoryProfileId, MnemesError};
 use semantic_memory::{SearchResult, SearchSourceType};
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
@@ -272,6 +272,55 @@ pub struct ShardRoutingReceipt {
 pub struct RoutedSearchResponse {
     pub results: Vec<RoutedSearchResult>,
     pub routing_receipt: ShardRoutingReceipt,
+}
+
+/// One search result from a snapshot-authorized profile store.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileRoutedSearchResult {
+    pub result: SearchResult,
+    /// Canonical store identity selected by the authorization snapshot.
+    pub store_id: String,
+    pub profile_id: MemoryProfileId,
+    pub owner_device_id: DeviceId,
+    pub namespace: String,
+    pub child_search_receipt_id: Option<String>,
+}
+
+/// Per-store execution evidence for one profile-bound routed search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileStoreSearchOutcome {
+    pub store_id: String,
+    pub profile_id: MemoryProfileId,
+    pub latency_ms: u64,
+    pub result_count: usize,
+    pub child_search_receipt_id: Option<String>,
+    pub error: Option<String>,
+}
+
+/// Durable global receipt for a profile-bound routed search.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ProfileRoutingReceipt {
+    pub receipt_id: String,
+    pub actor_id: ActorId,
+    pub subject_profile_id: MemoryProfileId,
+    pub authorization_snapshot_digest: String,
+    pub authorized_stores: Vec<AuthorizedMemoryStore>,
+    pub selected_stores: Vec<String>,
+    pub skipped_stores: Vec<String>,
+    pub outcomes: Vec<ProfileStoreSearchOutcome>,
+    /// False means one or more selected stores failed, so results are partial.
+    pub complete: bool,
+    pub final_result_ids: Vec<String>,
+    pub query_sha256: String,
+    pub receipt_digest: String,
+    pub recorded_at: String,
+}
+
+/// Typed response for the profile-bound route. No caller profile selector exists.
+#[derive(Debug, Clone, Serialize)]
+pub struct ProfileRoutedSearchResponse {
+    pub results: Vec<ProfileRoutedSearchResult>,
+    pub routing_receipt: ProfileRoutingReceipt,
 }
 
 /// Observable bounded-cache state without opening any shard.

@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 const DEFAULT_SHARD_CACHE_CAPACITY: usize = 4;
-const POOLED_SCHEMA_GENERATION: i64 = 2;
+const POOLED_SCHEMA_GENERATION: i64 = 3;
 const RECEIPT_AUTH_KEY_FILE: &str = ".routing-receipt-hmac.key";
 
 /// Raw Mnemes-owned supersession admission projection from the control plane.
@@ -278,6 +278,103 @@ fn validate_routing_receipt(
     }
     if routing_receipt_digest(auth_key, receipt)? != receipt.receipt_digest {
         return Err(invalid("routing receipt authentication mismatch"));
+    }
+    Ok(())
+}
+
+fn profile_routing_receipt_digest(
+    auth_key: &[u8; 32],
+    receipt: &ProfileRoutingReceipt,
+) -> Result<String, MnemesError> {
+    let material = serde_json::to_string(&(
+        "profile-routing-receipt-hmac-v1",
+        &receipt.receipt_id,
+        &receipt.actor_id,
+        &receipt.subject_profile_id,
+        &receipt.authorization_snapshot_digest,
+        &receipt.authorized_stores,
+        &receipt.selected_stores,
+        &receipt.skipped_stores,
+        &receipt.outcomes,
+        receipt.complete,
+        &receipt.final_result_ids,
+        &receipt.query_sha256,
+        &receipt.recorded_at,
+    ))
+    .map_err(|error| MnemesError::InvalidShardCatalog(error.to_string()))?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(auth_key)
+        .map_err(|error| MnemesError::InvalidShardCatalog(error.to_string()))?;
+    mac.update(material.as_bytes());
+    Ok(mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn validate_profile_routing_receipt(
+    auth_key: &[u8; 32],
+    receipt: &ProfileRoutingReceipt,
+) -> Result<(), MnemesError> {
+    let invalid = |reason: &str| MnemesError::InvalidShardCatalog(reason.to_string());
+    let is_digest =
+        |value: &str| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !is_digest(&receipt.authorization_snapshot_digest)
+        || !is_digest(&receipt.query_sha256)
+        || !is_digest(&receipt.receipt_digest)
+    {
+        return Err(invalid(
+            "profile routing receipt contains an invalid digest",
+        ));
+    }
+    let authorized = receipt
+        .authorized_stores
+        .iter()
+        .map(|store| store.store_id.as_str())
+        .collect::<HashSet<_>>();
+    let selected = receipt
+        .selected_stores
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let skipped = receipt
+        .skipped_stores
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let outcomes = receipt
+        .outcomes
+        .iter()
+        .map(|outcome| outcome.store_id.as_str())
+        .collect::<HashSet<_>>();
+    if authorized.len() != receipt.authorized_stores.len()
+        || selected.len() != receipt.selected_stores.len()
+        || skipped.len() != receipt.skipped_stores.len()
+        || outcomes.len() != receipt.outcomes.len()
+        || !selected.is_subset(&authorized)
+        || !skipped.is_subset(&authorized)
+        || !selected.is_disjoint(&skipped)
+        || selected.union(&skipped).count() != authorized.len()
+        || outcomes != selected
+        || receipt.complete
+            != receipt
+                .outcomes
+                .iter()
+                .all(|outcome| outcome.error.is_none())
+    {
+        return Err(invalid(
+            "profile routing receipt store sets are inconsistent",
+        ));
+    }
+    let final_ids = receipt.final_result_ids.iter().collect::<HashSet<_>>();
+    if final_ids.len() != receipt.final_result_ids.len() {
+        return Err(invalid(
+            "profile routing receipt contains duplicate final result IDs",
+        ));
+    }
+    if profile_routing_receipt_digest(auth_key, receipt)? != receipt.receipt_digest {
+        return Err(invalid("profile routing receipt authentication mismatch"));
     }
     Ok(())
 }
@@ -547,9 +644,9 @@ impl MnemesStore {
             let versions = statement
                 .query_map([], |row| row.get::<_, i64>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
-            if !matches!(versions.as_slice(), [1] | [1, 2]) {
+            if !matches!(versions.as_slice(), [1] | [1, 2] | [1, 2, 3]) {
                 return Err(MnemesError::InvalidShardCatalog(format!(
-                    "unsupported pooled schema generations {versions:?}; expected [1, 2]"
+                    "unsupported pooled schema generations {versions:?}; expected [1, 2, 3]"
                 )));
             }
         }
@@ -654,6 +751,18 @@ impl MnemesStore {
             );
             CREATE INDEX IF NOT EXISTS idx_actor_profile_bindings_resolve
                 ON actor_profile_bindings(actor_id, valid_from, expires_at, revoked_at);
+
+            CREATE TABLE IF NOT EXISTS profile_routing_receipts (
+                receipt_id                    TEXT PRIMARY KEY,
+                requester_actor_id            TEXT NOT NULL REFERENCES actors(actor_id),
+                subject_profile_id            TEXT NOT NULL REFERENCES memory_profiles(profile_id),
+                authorization_snapshot_digest TEXT NOT NULL CHECK (length(authorization_snapshot_digest) = 64),
+                receipt_json                  TEXT NOT NULL CHECK (json_valid(receipt_json)),
+                receipt_digest                TEXT NOT NULL CHECK (length(receipt_digest) = 64),
+                recorded_at                   TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_profile_routing_receipts_actor
+                ON profile_routing_receipts(requester_actor_id, recorded_at DESC);
 
             CREATE TABLE IF NOT EXISTS audit_events (
                 event_id TEXT PRIMARY KEY,
@@ -895,10 +1004,12 @@ impl MnemesStore {
             }
         }
 
-        conn.execute(
-            "INSERT OR IGNORE INTO _pooled_schema_version(version, applied_at) VALUES (?1, datetime('now'))",
-            [POOLED_SCHEMA_GENERATION],
-        )?;
+        for version in 2..=POOLED_SCHEMA_GENERATION {
+            conn.execute(
+                "INSERT OR IGNORE INTO _pooled_schema_version(version, applied_at) VALUES (?1, datetime('now'))",
+                [version],
+            )?;
+        }
         let schema_generation = conn.query_row(
             "SELECT MAX(version) FROM _pooled_schema_version",
             [],
@@ -3494,6 +3605,196 @@ impl MnemesStore {
             results,
             routing_receipt: receipt,
         })
+    }
+
+    /// Search only the stores admitted by the actor's current profile snapshot.
+    /// The request has no profile selector: subject resolution is server-side.
+    pub async fn routed_search_for_profile(
+        &self,
+        actor_id: &ActorId,
+        request: RoutingSearchRequest,
+        authorization_time: u64,
+    ) -> Result<ProfileRoutedSearchResponse, MnemesError> {
+        let snapshot = self
+            .build_authorization_snapshot(
+                actor_id,
+                MemoryAccessEffect::Search,
+                request.namespaces.as_deref(),
+                authorization_time,
+            )
+            .await?;
+        let authorized_stores = snapshot.authorized_stores.clone();
+        let selected_stores = authorized_stores
+            .iter()
+            .map(|store| store.store_id.clone())
+            .collect::<Vec<_>>();
+        let query_sha256 = sha256_hex(&request.query);
+        let mut outcomes = Vec::with_capacity(authorized_stores.len());
+        let mut results = Vec::new();
+        for authorized in &authorized_stores {
+            let started = Instant::now();
+            match self.profile_store_memory(&authorized.store_id).await {
+                Ok(memory) => {
+                    let namespaces = request
+                        .namespaces
+                        .as_ref()
+                        .map(|values| values.iter().map(String::as_str).collect::<Vec<_>>());
+                    match memory
+                        .search(
+                            &request.query,
+                            Some(request.top_k),
+                            namespaces.as_deref(),
+                            request.source_types.as_deref(),
+                        )
+                        .await
+                    {
+                        Ok(store_results) => {
+                            let result_count = store_results.len();
+                            results.extend(store_results.into_iter().map(|result| {
+                                ProfileRoutedSearchResult {
+                                    result,
+                                    store_id: authorized.store_id.clone(),
+                                    profile_id: authorized.profile_id.clone(),
+                                    owner_device_id: authorized.owner_device_id.clone(),
+                                    namespace: authorized.namespace.clone(),
+                                    child_search_receipt_id: None,
+                                }
+                            }));
+                            outcomes.push(ProfileStoreSearchOutcome {
+                                store_id: authorized.store_id.clone(),
+                                profile_id: authorized.profile_id.clone(),
+                                latency_ms: started.elapsed().as_millis().min(u128::from(u64::MAX))
+                                    as u64,
+                                result_count,
+                                child_search_receipt_id: None,
+                                error: None,
+                            });
+                        }
+                        Err(error) => outcomes.push(ProfileStoreSearchOutcome {
+                            store_id: authorized.store_id.clone(),
+                            profile_id: authorized.profile_id.clone(),
+                            latency_ms: started.elapsed().as_millis().min(u128::from(u64::MAX))
+                                as u64,
+                            result_count: 0,
+                            child_search_receipt_id: None,
+                            error: Some(error.to_string()),
+                        }),
+                    }
+                }
+                Err(error) => outcomes.push(ProfileStoreSearchOutcome {
+                    store_id: authorized.store_id.clone(),
+                    profile_id: authorized.profile_id.clone(),
+                    latency_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                    result_count: 0,
+                    child_search_receipt_id: None,
+                    error: Some(error.to_string()),
+                }),
+            }
+        }
+        results.sort_by(|left, right| {
+            right
+                .result
+                .score
+                .total_cmp(&left.result.score)
+                .then_with(|| {
+                    left.result
+                        .source
+                        .result_id()
+                        .cmp(&right.result.source.result_id())
+                })
+                .then_with(|| left.store_id.cmp(&right.store_id))
+        });
+        let mut content_by_id = HashMap::<String, String>::new();
+        let mut emitted = HashSet::<String>::new();
+        let mut merged = Vec::new();
+        for result in results {
+            let result_id = result.result.source.result_id();
+            if let Some(existing) = content_by_id.get(&result_id) {
+                if existing != &result.result.content {
+                    return Err(MnemesError::ConflictingShardItem { item_id: result_id });
+                }
+            } else {
+                content_by_id.insert(result_id.clone(), result.result.content.clone());
+            }
+            if emitted.insert(result_id) {
+                merged.push(result);
+            }
+        }
+        merged.truncate(request.top_k);
+        let final_result_ids = merged
+            .iter()
+            .map(|result| result.result.source.result_id())
+            .collect::<Vec<_>>();
+        let mut receipt = ProfileRoutingReceipt {
+            receipt_id: uuid::Uuid::new_v4().to_string(),
+            actor_id: actor_id.clone(),
+            subject_profile_id: snapshot.subject_profile_id.clone(),
+            authorization_snapshot_digest: snapshot.snapshot_digest.clone(),
+            authorized_stores,
+            selected_stores,
+            skipped_stores: Vec::new(),
+            complete: outcomes.iter().all(|outcome| outcome.error.is_none()),
+            outcomes,
+            final_result_ids,
+            query_sha256,
+            receipt_digest: String::new(),
+            recorded_at: Utc::now().to_rfc3339(),
+        };
+        receipt.receipt_digest = profile_routing_receipt_digest(&self.receipt_auth_key, &receipt)?;
+        validate_profile_routing_receipt(&self.receipt_auth_key, &receipt)?;
+        self.persist_profile_routing_receipt(&receipt).await?;
+        Ok(ProfileRoutedSearchResponse {
+            results: merged,
+            routing_receipt: receipt,
+        })
+    }
+
+    async fn persist_profile_routing_receipt(
+        &self,
+        receipt: &ProfileRoutingReceipt,
+    ) -> Result<(), MnemesError> {
+        validate_profile_routing_receipt(&self.receipt_auth_key, receipt)?;
+        let payload = serde_json::to_string(receipt)
+            .map_err(|error| MnemesError::InvalidShardCatalog(error.to_string()))?;
+        let conn = self.pool_conn.lock().await;
+        conn.execute(
+            "INSERT INTO profile_routing_receipts(
+                receipt_id, requester_actor_id, subject_profile_id,
+                authorization_snapshot_digest, receipt_json, receipt_digest, recorded_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                receipt.receipt_id,
+                receipt.actor_id.as_str(),
+                receipt.subject_profile_id.as_str(),
+                receipt.authorization_snapshot_digest,
+                payload,
+                receipt.receipt_digest,
+                receipt.recorded_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Read and authenticate one durable profile routing receipt.
+    pub async fn get_profile_routing_receipt(
+        &self,
+        receipt_id: &str,
+    ) -> Result<Option<ProfileRoutingReceipt>, MnemesError> {
+        let conn = self.pool_conn.lock().await;
+        let payload = conn
+            .query_row(
+                "SELECT receipt_json FROM profile_routing_receipts WHERE receipt_id = ?1",
+                params![receipt_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(payload) = payload else {
+            return Ok(None);
+        };
+        let receipt = serde_json::from_str::<ProfileRoutingReceipt>(&payload)
+            .map_err(|error| MnemesError::InvalidShardCatalog(error.to_string()))?;
+        validate_profile_routing_receipt(&self.receipt_auth_key, &receipt)?;
+        Ok(Some(receipt))
     }
 
     async fn persist_routing_receipt(
