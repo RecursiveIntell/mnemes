@@ -3,7 +3,7 @@
 **Status:** Plan complete; implementation intentionally not started
 **Plan owner:** Mnemes source owner (`RecursiveIntell/mnemes`)
 **Evidence cutoff:** 2026-09-10T20:18:47Z
-**Source snapshot:** `feat/profile-store-grants-20260910` @ `0abac8446f6c2aa4630aa10088d58b17f22ab1ac`
+**Source snapshot:** implementation commit `0abac8446f6c2aa4630aa10088d58b17f22ab1ac`; plan reviewed and committed at candidate head `a10ba56e9e21bf4d2f2d81eeb7840c93948508b6`
 **Plan artifact:** `docs/RUNTIME_FEDERATION_BINDING_PLAN.md`
 
 > **Hard exclusion:** The actual `NousResearch/hermes-agent` repository and PR #94878 are not part of this plan's mutation scope. No source, branch, PR body, comment, merge, or other external state in that repository may be changed by this workstream.
@@ -35,6 +35,7 @@ A request that cannot establish every link fails closed. There is no fallback fr
 
 Observed in the isolated source snapshot:
 
+- The candidate adds locally tested profile/store/grant control-plane types and persistence helpers. These are not yet consumed by runtime profile-bound routing or HTTP/MCP search.
 - `src/profile_store.rs` now owns `MemoryProfileId`, `MemoryProfile`, `MemoryStoreIdentity`, `MemoryAccessGrant`, lifecycle states, bounded effects/time windows, and the pure deterministic authorizer.
 - `src/store.rs` owns the `pooled.db` schema and currently persists `memory_profiles`, `memory_stores`, and `memory_access_grants`.
 - Profile/store registration checks active device ownership and path safety.
@@ -77,7 +78,7 @@ These are observed source facts. They are not a claim that the current Mnemes se
 
 All web research in this section was performed through K(e)enable on 2026-09-10. Search snippets are discovery evidence; the linked documents were fetched where material.
 
-### 3.1 MCP authorization: transport identity is separate from application authorization
+### 3.1 MCP authorization: transport authentication is separate from application authorization
 
 Primary source: [MCP Authorization, 2026-07-28](https://modelcontextprotocol.io/specification/2026-07-28/basic/authorization).
 
@@ -395,6 +396,8 @@ Operator-only control-plane APIs:
 - inspect store-to-replica mapping;
 - rotate/revoke federation peer keys.
 
+Grant issuance checks an active operator actor. The current public lifecycle helper methods do not themselves accept an authenticated actor context and are not exposed by the current HTTP/MCP surface; operator-authenticated lifecycle APIs remain a future integration gate.
+
 Agent/read APIs:
 
 - profile-bound witnessed search;
@@ -606,10 +609,10 @@ Final admission requires every required negative witness and every recovery dril
 Use `scripts/run_tests.sh`/project-native test commands as applicable. For Rust, the minimum local baseline remains:
 
 ```bash
-/home/sikmindz/.cargo/bin/cargo fmt --all -- --check
-/home/sikmindz/.cargo/bin/cargo check --locked --all-targets
-/home/sikmindz/.cargo/bin/cargo test --locked --all-features
-/home/sikmindz/.cargo/bin/cargo clippy --locked --all-targets --all-features -- -D warnings
+cargo fmt --all -- --check
+cargo check --locked --all-targets
+cargo test --locked --all-features
+cargo clippy --locked --all-targets --all-features -- -D warnings
 ```
 
 Add targeted tests per phase before broader matrices. Do not use source-text tests to prove wiring.
