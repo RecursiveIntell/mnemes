@@ -6,6 +6,7 @@
 //! without this crate.
 
 pub mod error;
+pub mod profile_store;
 pub mod replica;
 pub mod replication;
 pub mod run_pack;
@@ -18,6 +19,10 @@ pub mod sync_handler;
 pub mod types;
 
 pub use error::MnemesError;
+pub use profile_store::{
+    authorize_memory_access, MemoryAccessEffect, MemoryAccessGrant, MemoryGrantId, MemoryProfile,
+    MemoryProfileId, MemoryProfileStatus, MemoryStoreIdentity, MemoryStoreStatus,
+};
 pub use run_pack::RunPackEvidenceProjectionV1;
 pub use shards::*;
 pub use store::{

@@ -2,6 +2,7 @@
 //! database and lazily opened device-owned `semantic_memory::MemoryStore` shards.
 
 use crate::error::MnemesError;
+use crate::profile_store::*;
 use crate::replication::{SignedFactCreateBatchV1, SignedFactSupersedeBatchV1};
 use crate::shards::*;
 use crate::types::*;
@@ -587,6 +588,48 @@ impl MnemesStore {
             );
             CREATE INDEX IF NOT EXISTS idx_actors_device ON actors(device_id);
 
+            CREATE TABLE IF NOT EXISTS memory_profiles (
+                profile_id      TEXT PRIMARY KEY,
+                owner_device_id TEXT NOT NULL REFERENCES devices(device_id),
+                label           TEXT NOT NULL,
+                status          TEXT NOT NULL DEFAULT 'active'
+                    CHECK (status IN ('active', 'revoked')),
+                created_at      TEXT NOT NULL
+            );
+
+            CREATE TABLE IF NOT EXISTS memory_stores (
+                store_id        TEXT PRIMARY KEY,
+                profile_id      TEXT NOT NULL REFERENCES memory_profiles(profile_id),
+                owner_device_id TEXT NOT NULL REFERENCES devices(device_id),
+                namespace       TEXT NOT NULL,
+                relative_path   TEXT NOT NULL UNIQUE,
+                status          TEXT NOT NULL DEFAULT 'active'
+                    CHECK (status IN ('active', 'quarantined', 'revoked')),
+                created_at      TEXT NOT NULL,
+                CHECK (length(store_id) > 0),
+                CHECK (length(namespace) > 0),
+                CHECK (length(relative_path) > 0)
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_stores_profile
+                ON memory_stores(profile_id, status);
+
+            CREATE TABLE IF NOT EXISTS memory_access_grants (
+                grant_id          TEXT PRIMARY KEY,
+                grantee_profile_id TEXT NOT NULL REFERENCES memory_profiles(profile_id),
+                store_id          TEXT NOT NULL REFERENCES memory_stores(store_id),
+                namespace         TEXT NOT NULL,
+                effect            TEXT NOT NULL CHECK (effect IN ('search', 'read', 'write')),
+                issued_by_actor_id TEXT NOT NULL REFERENCES actors(actor_id),
+                valid_from        INTEGER NOT NULL CHECK (valid_from >= 0),
+                expires_at        INTEGER NOT NULL CHECK (expires_at > valid_from),
+                revoked_at        INTEGER,
+                created_at        TEXT NOT NULL,
+                CHECK (revoked_at IS NULL OR revoked_at >= valid_from),
+                UNIQUE(grantee_profile_id, store_id, namespace, effect, valid_from)
+            );
+            CREATE INDEX IF NOT EXISTS idx_memory_access_grants_lookup
+                ON memory_access_grants(grantee_profile_id, store_id, namespace, effect, revoked_at);
+
             CREATE TABLE IF NOT EXISTS audit_events (
                 event_id TEXT PRIMARY KEY,
                 device_id TEXT,
@@ -1164,6 +1207,424 @@ impl MnemesStore {
             }
         }
 
+        Ok(())
+    }
+
+    // ─── Profile/store/grant registry ─────────────────────────────────
+
+    /// Register one profile owned by an active device.
+    pub async fn register_memory_profile(
+        &self,
+        mut profile: MemoryProfile,
+    ) -> Result<MemoryProfileId, MnemesError> {
+        profile.validate()?;
+        if profile.status != MemoryProfileStatus::Active {
+            return Err(MnemesError::InvalidMemoryScope(
+                "new memory profiles must be active".to_string(),
+            ));
+        }
+        let now = Utc::now().to_rfc3339();
+        let conn = self.pool_conn.lock().await;
+        let active: Option<String> = conn
+            .query_row(
+                "SELECT status FROM devices WHERE device_id = ?1",
+                params![profile.owner_device_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if active.as_deref() != Some(DeviceStatus::Active.as_str()) {
+            return Err(MnemesError::DeviceNotActive(
+                profile.owner_device_id.to_string(),
+            ));
+        }
+        profile.created_at = now;
+        conn.execute(
+            "INSERT INTO memory_profiles(profile_id, owner_device_id, label, status, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![
+                profile.profile_id.as_str(),
+                profile.owner_device_id.as_str(),
+                profile.label,
+                profile.status.as_str(),
+                profile.created_at,
+            ],
+        )?;
+        Ok(profile.profile_id)
+    }
+
+    /// Register one independently addressable store for an active profile.
+    pub async fn register_memory_store(
+        &self,
+        mut store: MemoryStoreIdentity,
+    ) -> Result<String, MnemesError> {
+        store.validate()?;
+        if store.status != MemoryStoreStatus::Active {
+            return Err(MnemesError::InvalidMemoryScope(
+                "new memory stores must be active".to_string(),
+            ));
+        }
+        let now = Utc::now().to_rfc3339();
+        let conn = self.pool_conn.lock().await;
+        let owner: Option<(String, String)> = conn
+            .query_row(
+                "SELECT p.owner_device_id, d.status
+                 FROM memory_profiles p
+                 JOIN devices d ON d.device_id = p.owner_device_id
+                 WHERE p.profile_id = ?1 AND p.status = 'active'",
+                params![store.profile_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((owner_device, device_status)) = owner else {
+            return Err(MnemesError::MemoryGrantDenied(
+                "store profile is not active or does not exist".to_string(),
+            ));
+        };
+        if device_status != DeviceStatus::Active.as_str() {
+            return Err(MnemesError::DeviceNotActive(owner_device));
+        }
+        if owner_device != store.owner_device_id.as_str() {
+            return Err(MnemesError::MemoryGrantDenied(
+                "store owner device does not match the active profile owner".to_string(),
+            ));
+        }
+        store.created_at = now;
+        conn.execute(
+            "INSERT INTO memory_stores(
+                store_id, profile_id, owner_device_id, namespace, relative_path, status, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                store.store_id,
+                store.profile_id.as_str(),
+                store.owner_device_id.as_str(),
+                store.namespace,
+                store.relative_path,
+                store.status.as_str(),
+                store.created_at,
+            ],
+        )?;
+        Ok(store.store_id)
+    }
+
+    /// Issue a grant through an operator actor; HTTP callers cannot self-grant.
+    pub async fn grant_memory_access(
+        &self,
+        mut grant: MemoryAccessGrant,
+    ) -> Result<MemoryGrantId, MnemesError> {
+        grant.validate()?;
+        let now = Utc::now().to_rfc3339();
+        let conn = self.pool_conn.lock().await;
+        let issuer_is_operator: Option<bool> = conn
+            .query_row(
+                "SELECT a.tool_profile = 'operator' AND d.status = 'active'
+                 FROM actors a JOIN devices d ON d.device_id = a.device_id
+                 WHERE a.actor_id = ?1",
+                params![grant.issued_by_actor_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if issuer_is_operator != Some(true) {
+            return Err(MnemesError::AuthorizationDenied(
+                "memory grants require an active operator actor".to_string(),
+            ));
+        }
+        let target_store: Option<(String, String, String, String)> = conn
+            .query_row(
+                "SELECT s.namespace, s.owner_device_id, p.status, d.status
+                 FROM memory_stores s
+                 JOIN memory_profiles p ON p.profile_id = s.profile_id
+                 JOIN devices d ON d.device_id = s.owner_device_id
+                 WHERE s.store_id = ?1 AND s.status = 'active'",
+                params![grant.store_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .optional()?;
+        let Some((store_namespace, owner_device_id, owner_profile_status, owner_device_status)) =
+            target_store
+        else {
+            return Err(MnemesError::MemoryGrantDenied(
+                "grant target store is not active or does not exist".to_string(),
+            ));
+        };
+        if store_namespace != grant.namespace {
+            return Err(MnemesError::MemoryGrantDenied(
+                "grant namespace does not match the target store".to_string(),
+            ));
+        }
+        if owner_profile_status != MemoryProfileStatus::Active.as_str() {
+            return Err(MnemesError::MemoryGrantDenied(
+                "grant target profile is not active".to_string(),
+            ));
+        }
+        if owner_device_status != DeviceStatus::Active.as_str() {
+            return Err(MnemesError::DeviceNotActive(owner_device_id));
+        }
+        let grantee_owner: Option<(String, String)> = conn
+            .query_row(
+                "SELECT p.status, d.status
+                 FROM memory_profiles p
+                 JOIN devices d ON d.device_id = p.owner_device_id
+                 WHERE p.profile_id = ?1",
+                params![grant.grantee_profile_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((grantee_status, grantee_device_status)) = grantee_owner else {
+            return Err(MnemesError::MemoryGrantDenied(
+                "grant grantee profile does not exist".to_string(),
+            ));
+        };
+        if grantee_status != MemoryProfileStatus::Active.as_str() {
+            return Err(MnemesError::MemoryGrantDenied(
+                "grant grantee profile is not active".to_string(),
+            ));
+        }
+        if grantee_device_status != DeviceStatus::Active.as_str() {
+            return Err(MnemesError::MemoryGrantDenied(
+                "grant grantee device is not active".to_string(),
+            ));
+        }
+        grant.created_at = now;
+        conn.execute(
+            "INSERT INTO memory_access_grants(
+                grant_id, grantee_profile_id, store_id, namespace, effect,
+                issued_by_actor_id, valid_from, expires_at, revoked_at, created_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+            params![
+                grant.grant_id.as_str(),
+                grant.grantee_profile_id.as_str(),
+                grant.store_id,
+                grant.namespace,
+                grant.effect.as_str(),
+                grant.issued_by_actor_id.as_str(),
+                grant.valid_from as i64,
+                grant.expires_at as i64,
+                grant.revoked_at.map(|value| value as i64),
+                grant.created_at,
+            ],
+        )?;
+        Ok(grant.grant_id)
+    }
+
+    /// Revoke one grant without deleting its append-only control-plane record.
+    pub async fn revoke_memory_access(
+        &self,
+        grant_id: &MemoryGrantId,
+        revoked_at: u64,
+    ) -> Result<(), MnemesError> {
+        let conn = self.pool_conn.lock().await;
+        let affected = conn.execute(
+            "UPDATE memory_access_grants SET revoked_at = ?1
+             WHERE grant_id = ?2 AND revoked_at IS NULL",
+            params![revoked_at as i64, grant_id.as_str()],
+        )?;
+        if affected == 0 {
+            return Err(MnemesError::MemoryGrantDenied(
+                "grant does not exist or is already revoked".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Authorize one exact profile/store/namespace/effect request at a timestamp.
+    pub async fn authorize_memory_access(
+        &self,
+        requester_profile_id: &MemoryProfileId,
+        store_id: &str,
+        namespace: &str,
+        effect: MemoryAccessEffect,
+        at: u64,
+    ) -> Result<(), MnemesError> {
+        let conn = self.pool_conn.lock().await;
+        let profile = conn
+            .query_row(
+                "SELECT profile_id, owner_device_id, label, status, created_at
+                 FROM memory_profiles WHERE profile_id = ?1",
+                params![requester_profile_id.as_str()],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| {
+                MnemesError::MemoryGrantDenied("requesting profile not found".to_string())
+            })?;
+        let profile = MemoryProfile {
+            profile_id: MemoryProfileId::parse(profile.0)?,
+            owner_device_id: DeviceId::parse(profile.1)?,
+            label: profile.2,
+            status: MemoryProfileStatus::parse(&profile.3)?,
+            created_at: profile.4,
+        };
+        let requester_device_status: String = conn.query_row(
+            "SELECT status FROM devices WHERE device_id = ?1",
+            params![profile.owner_device_id.as_str()],
+            |row| row.get(0),
+        )?;
+        if requester_device_status != DeviceStatus::Active.as_str() {
+            return Err(MnemesError::DeviceNotActive(
+                profile.owner_device_id.to_string(),
+            ));
+        }
+        let store_row = conn
+            .query_row(
+                "SELECT store_id, profile_id, owner_device_id, namespace, relative_path, status, created_at
+                 FROM memory_stores WHERE store_id = ?1",
+                params![store_id],
+                |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                },
+            )
+            .optional()?
+            .ok_or_else(|| MnemesError::MemoryGrantDenied("target store not found".to_string()))?;
+        let mut store = MemoryStoreIdentity::new(
+            store_row.0,
+            MemoryProfileId::parse(store_row.1)?,
+            DeviceId::parse(store_row.2)?,
+            store_row.3,
+            store_row.4,
+        )?;
+        store.status = MemoryStoreStatus::parse(&store_row.5)?;
+        store.created_at = store_row.6;
+        let owner_device_status: String = conn.query_row(
+            "SELECT status FROM devices WHERE device_id = ?1",
+            params![store.owner_device_id.as_str()],
+            |row| row.get(0),
+        )?;
+        if owner_device_status != DeviceStatus::Active.as_str() {
+            return Err(MnemesError::DeviceNotActive(
+                store.owner_device_id.to_string(),
+            ));
+        }
+        let owner_profile_status: String = conn.query_row(
+            "SELECT status FROM memory_profiles WHERE profile_id = ?1",
+            params![store.profile_id.as_str()],
+            |row| row.get(0),
+        )?;
+        if owner_profile_status != MemoryProfileStatus::Active.as_str() {
+            return Err(MnemesError::MemoryGrantDenied(
+                "target store owner profile is not active".to_string(),
+            ));
+        }
+        let mut statement = conn.prepare(
+            "SELECT grant_id, grantee_profile_id, store_id, namespace, effect,
+                    issued_by_actor_id, valid_from, expires_at, revoked_at, created_at
+             FROM memory_access_grants
+             WHERE grantee_profile_id = ?1 AND store_id = ?2
+             ORDER BY valid_from ASC, grant_id ASC",
+        )?;
+        let rows =
+            statement.query_map(params![requester_profile_id.as_str(), store_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, String>(9)?,
+                ))
+            })?;
+        let mut grants = Vec::new();
+        for row in rows {
+            let (
+                grant_id,
+                grantee_profile_id,
+                grant_store_id,
+                grant_namespace,
+                grant_effect,
+                issued_by_actor_id,
+                valid_from,
+                expires_at,
+                revoked_at,
+                created_at,
+            ) = row?;
+            grants.push(MemoryAccessGrant {
+                grant_id: MemoryGrantId::parse(grant_id)?,
+                grantee_profile_id: MemoryProfileId::parse(grantee_profile_id)?,
+                store_id: grant_store_id,
+                namespace: grant_namespace,
+                effect: MemoryAccessEffect::parse(&grant_effect)?,
+                issued_by_actor_id: ActorId::parse(issued_by_actor_id)?,
+                valid_from: u64::try_from(valid_from).map_err(|_| {
+                    MnemesError::InvalidMemoryScope("negative grant valid_from".to_string())
+                })?,
+                expires_at: u64::try_from(expires_at).map_err(|_| {
+                    MnemesError::InvalidMemoryScope("negative grant expires_at".to_string())
+                })?,
+                revoked_at: revoked_at
+                    .map(|value| {
+                        u64::try_from(value).map_err(|_| {
+                            MnemesError::InvalidMemoryScope("negative grant revoked_at".to_string())
+                        })
+                    })
+                    .transpose()?,
+                created_at,
+            });
+        }
+        authorize_memory_access(
+            requester_profile_id,
+            &profile,
+            &store,
+            &grants,
+            effect,
+            namespace,
+            at,
+        )
+    }
+
+    /// Change a profile lifecycle state without deleting its history.
+    pub async fn set_memory_profile_status(
+        &self,
+        profile_id: &MemoryProfileId,
+        status: MemoryProfileStatus,
+    ) -> Result<(), MnemesError> {
+        let conn = self.pool_conn.lock().await;
+        let affected = conn.execute(
+            "UPDATE memory_profiles SET status = ?1 WHERE profile_id = ?2",
+            params![status.as_str(), profile_id.as_str()],
+        )?;
+        if affected == 0 {
+            return Err(MnemesError::MemoryGrantDenied(
+                "memory profile does not exist".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Change a store lifecycle state without deleting its history.
+    pub async fn set_memory_store_status(
+        &self,
+        store_id: &str,
+        status: MemoryStoreStatus,
+    ) -> Result<(), MnemesError> {
+        let conn = self.pool_conn.lock().await;
+        let affected = conn.execute(
+            "UPDATE memory_stores SET status = ?1 WHERE store_id = ?2",
+            params![status.as_str(), store_id],
+        )?;
+        if affected == 0 {
+            return Err(MnemesError::MemoryGrantDenied(
+                "memory store does not exist".to_string(),
+            ));
+        }
         Ok(())
     }
 
@@ -4293,6 +4754,167 @@ mod tests {
         let actors = store.list_actors().await.unwrap();
         assert_eq!(devices.len(), 1);
         assert_eq!(actors.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn profile_store_access_requires_explicit_grant_and_honors_revocation() {
+        let (store, _dir) = open_test_store();
+        let owner_device = DeviceId::new();
+        let requester_device = DeviceId::new();
+        store
+            .register_device(Device::new(
+                owner_device.clone(),
+                "owner",
+                "linux",
+                "owner-host",
+            ))
+            .await
+            .unwrap();
+        store
+            .register_device(Device::new(
+                requester_device.clone(),
+                "requester",
+                "linux",
+                "requester-host",
+            ))
+            .await
+            .unwrap();
+
+        let operator_id = ActorId::new();
+        let mut operator = Actor::new(operator_id.clone(), owner_device.clone(), ActorKind::Human);
+        operator.tool_profile = ToolProfile::Operator;
+        store.register_actor(operator).await.unwrap();
+
+        let owner_profile = MemoryProfile::new(
+            MemoryProfileId::new("owner-profile").unwrap(),
+            owner_device.clone(),
+            "Owner profile",
+        )
+        .unwrap();
+        let requester_profile = MemoryProfile::new(
+            MemoryProfileId::new("requester-profile").unwrap(),
+            requester_device.clone(),
+            "Requester profile",
+        )
+        .unwrap();
+        store
+            .register_memory_profile(owner_profile.clone())
+            .await
+            .unwrap();
+        store
+            .register_memory_profile(requester_profile.clone())
+            .await
+            .unwrap();
+
+        let memory_store = MemoryStoreIdentity::new(
+            "owner-store",
+            owner_profile.profile_id.clone(),
+            owner_device.clone(),
+            "private",
+            "memory/shards/owner-profile",
+        )
+        .unwrap();
+        store
+            .register_memory_store(memory_store.clone())
+            .await
+            .unwrap();
+
+        assert!(store
+            .authorize_memory_access(
+                &requester_profile.profile_id,
+                &memory_store.store_id,
+                "private",
+                MemoryAccessEffect::Search,
+                10,
+            )
+            .await
+            .is_err());
+
+        let grant = MemoryAccessGrant {
+            grant_id: MemoryGrantId::new(),
+            grantee_profile_id: requester_profile.profile_id.clone(),
+            store_id: memory_store.store_id.clone(),
+            namespace: "private".to_string(),
+            effect: MemoryAccessEffect::Search,
+            issued_by_actor_id: operator_id,
+            valid_from: 10,
+            expires_at: 20,
+            revoked_at: None,
+            created_at: String::new(),
+        };
+        let grant_id = grant.grant_id.clone();
+        store.grant_memory_access(grant).await.unwrap();
+        assert!(store
+            .authorize_memory_access(
+                &requester_profile.profile_id,
+                &memory_store.store_id,
+                "private",
+                MemoryAccessEffect::Search,
+                10,
+            )
+            .await
+            .is_ok());
+
+        store
+            .set_memory_store_status(&memory_store.store_id, MemoryStoreStatus::Revoked)
+            .await
+            .unwrap();
+        assert!(store
+            .authorize_memory_access(
+                &requester_profile.profile_id,
+                &memory_store.store_id,
+                "private",
+                MemoryAccessEffect::Search,
+                10,
+            )
+            .await
+            .is_err());
+
+        store
+            .set_memory_store_status(&memory_store.store_id, MemoryStoreStatus::Active)
+            .await
+            .unwrap();
+        store
+            .set_memory_profile_status(&owner_profile.profile_id, MemoryProfileStatus::Revoked)
+            .await
+            .unwrap();
+        assert!(store
+            .authorize_memory_access(
+                &requester_profile.profile_id,
+                &memory_store.store_id,
+                "private",
+                MemoryAccessEffect::Search,
+                10,
+            )
+            .await
+            .is_err());
+        store
+            .set_memory_profile_status(&owner_profile.profile_id, MemoryProfileStatus::Active)
+            .await
+            .unwrap();
+        store.revoke_memory_access(&grant_id, 15).await.unwrap();
+        assert!(store
+            .authorize_memory_access(
+                &requester_profile.profile_id,
+                &memory_store.store_id,
+                "private",
+                MemoryAccessEffect::Search,
+                10,
+            )
+            .await
+            .is_err());
+
+        store.revoke_device(&owner_device).await.unwrap();
+        assert!(store
+            .authorize_memory_access(
+                &requester_profile.profile_id,
+                &memory_store.store_id,
+                "private",
+                MemoryAccessEffect::Search,
+                10,
+            )
+            .await
+            .is_err());
     }
 
     #[test]
