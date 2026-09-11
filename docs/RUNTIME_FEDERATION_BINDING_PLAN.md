@@ -707,8 +707,9 @@ Revisit this plan when any of the following changes:
 Until then, the strongest supportable state is:
 
 ```text
-Mnemes profile/store/grant control-plane contract: locally implemented; test evidence is recorded in the candidate closeout and must be rerun against the exact publication head.
-Runtime profile-bound federation: planned, not active.
+Mnemes profile/store/grant control plane: implemented on an isolated local candidate; exact publication-head validation remains required.
+Local actor-bound, grant-filtered profile routing: implemented on the isolated candidate with negative authorization, revocation, partial-store, and receipt read-back tests.
+HTTP/MCP profile-bound route: not implemented or active.
 Remote federation: not admitted.
 Production readiness: not claimed.
 ```

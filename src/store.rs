@@ -24,7 +24,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 const DEFAULT_SHARD_CACHE_CAPACITY: usize = 4;
-const POOLED_SCHEMA_GENERATION: i64 = 1;
+const POOLED_SCHEMA_GENERATION: i64 = 3;
 const RECEIPT_AUTH_KEY_FILE: &str = ".routing-receipt-hmac.key";
 
 /// Raw Mnemes-owned supersession admission projection from the control plane.
@@ -147,7 +147,10 @@ impl ShardStoreCache {
     }
 
     fn get(&mut self, device_id: &DeviceId) -> Option<Arc<semantic_memory::MemoryStore>> {
-        let key = device_id.as_str();
+        self.get_key(device_id.as_str())
+    }
+
+    fn get_key(&mut self, key: &str) -> Option<Arc<semantic_memory::MemoryStore>> {
         let store = self.stores.get(key)?.clone();
         self.lru.retain(|value| value != key);
         self.lru.push_back(key.to_string());
@@ -155,7 +158,11 @@ impl ShardStoreCache {
     }
 
     fn insert(&mut self, device_id: &DeviceId, store: Arc<semantic_memory::MemoryStore>) {
-        let key = device_id.as_str().to_string();
+        self.insert_key(device_id.as_str(), store);
+    }
+
+    fn insert_key(&mut self, key: &str, store: Arc<semantic_memory::MemoryStore>) {
+        let key = key.to_string();
         self.lru.retain(|value| value != &key);
         self.stores.insert(key.clone(), store);
         self.lru.push_back(key);
@@ -271,6 +278,103 @@ fn validate_routing_receipt(
     }
     if routing_receipt_digest(auth_key, receipt)? != receipt.receipt_digest {
         return Err(invalid("routing receipt authentication mismatch"));
+    }
+    Ok(())
+}
+
+fn profile_routing_receipt_digest(
+    auth_key: &[u8; 32],
+    receipt: &ProfileRoutingReceipt,
+) -> Result<String, MnemesError> {
+    let material = serde_json::to_string(&(
+        "profile-routing-receipt-hmac-v1",
+        &receipt.receipt_id,
+        &receipt.actor_id,
+        &receipt.subject_profile_id,
+        &receipt.authorization_snapshot_digest,
+        &receipt.authorized_stores,
+        &receipt.selected_stores,
+        &receipt.skipped_stores,
+        &receipt.outcomes,
+        receipt.complete,
+        &receipt.final_result_ids,
+        &receipt.query_sha256,
+        &receipt.recorded_at,
+    ))
+    .map_err(|error| MnemesError::InvalidShardCatalog(error.to_string()))?;
+    let mut mac = Hmac::<Sha256>::new_from_slice(auth_key)
+        .map_err(|error| MnemesError::InvalidShardCatalog(error.to_string()))?;
+    mac.update(material.as_bytes());
+    Ok(mac
+        .finalize()
+        .into_bytes()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect())
+}
+
+fn validate_profile_routing_receipt(
+    auth_key: &[u8; 32],
+    receipt: &ProfileRoutingReceipt,
+) -> Result<(), MnemesError> {
+    let invalid = |reason: &str| MnemesError::InvalidShardCatalog(reason.to_string());
+    let is_digest =
+        |value: &str| value.len() == 64 && value.bytes().all(|byte| byte.is_ascii_hexdigit());
+    if !is_digest(&receipt.authorization_snapshot_digest)
+        || !is_digest(&receipt.query_sha256)
+        || !is_digest(&receipt.receipt_digest)
+    {
+        return Err(invalid(
+            "profile routing receipt contains an invalid digest",
+        ));
+    }
+    let authorized = receipt
+        .authorized_stores
+        .iter()
+        .map(|store| store.store_id.as_str())
+        .collect::<HashSet<_>>();
+    let selected = receipt
+        .selected_stores
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let skipped = receipt
+        .skipped_stores
+        .iter()
+        .map(String::as_str)
+        .collect::<HashSet<_>>();
+    let outcomes = receipt
+        .outcomes
+        .iter()
+        .map(|outcome| outcome.store_id.as_str())
+        .collect::<HashSet<_>>();
+    if authorized.len() != receipt.authorized_stores.len()
+        || selected.len() != receipt.selected_stores.len()
+        || skipped.len() != receipt.skipped_stores.len()
+        || outcomes.len() != receipt.outcomes.len()
+        || !selected.is_subset(&authorized)
+        || !skipped.is_subset(&authorized)
+        || !selected.is_disjoint(&skipped)
+        || selected.union(&skipped).count() != authorized.len()
+        || outcomes != selected
+        || receipt.complete
+            != receipt
+                .outcomes
+                .iter()
+                .all(|outcome| outcome.error.is_none())
+    {
+        return Err(invalid(
+            "profile routing receipt store sets are inconsistent",
+        ));
+    }
+    let final_ids = receipt.final_result_ids.iter().collect::<HashSet<_>>();
+    if final_ids.len() != receipt.final_result_ids.len() {
+        return Err(invalid(
+            "profile routing receipt contains duplicate final result IDs",
+        ));
+    }
+    if profile_routing_receipt_digest(auth_key, receipt)? != receipt.receipt_digest {
+        return Err(invalid("profile routing receipt authentication mismatch"));
     }
     Ok(())
 }
@@ -540,9 +644,9 @@ impl MnemesStore {
             let versions = statement
                 .query_map([], |row| row.get::<_, i64>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
-            if versions != [POOLED_SCHEMA_GENERATION] {
+            if !matches!(versions.as_slice(), [1] | [2] | [3] | [1, 2] | [1, 2, 3]) {
                 return Err(MnemesError::InvalidShardCatalog(format!(
-                    "unsupported pooled schema generations {versions:?}; expected only {POOLED_SCHEMA_GENERATION}"
+                    "unsupported pooled schema generations {versions:?}; expected a supported generation marker"
                 )));
             }
         }
@@ -629,6 +733,36 @@ impl MnemesStore {
             );
             CREATE INDEX IF NOT EXISTS idx_memory_access_grants_lookup
                 ON memory_access_grants(grantee_profile_id, store_id, namespace, effect, revoked_at);
+
+            CREATE TABLE IF NOT EXISTS actor_profile_bindings (
+                binding_id          TEXT PRIMARY KEY,
+                actor_id            TEXT NOT NULL REFERENCES actors(actor_id),
+                profile_id          TEXT NOT NULL REFERENCES memory_profiles(profile_id),
+                owner_device_id     TEXT NOT NULL REFERENCES devices(device_id),
+                issued_by_actor_id  TEXT NOT NULL REFERENCES actors(actor_id),
+                valid_from          INTEGER NOT NULL CHECK (valid_from >= 0),
+                expires_at          INTEGER NOT NULL CHECK (expires_at > valid_from),
+                revoked_at          INTEGER,
+                binding_epoch       INTEGER NOT NULL CHECK (binding_epoch > 0),
+                binding_digest      TEXT NOT NULL CHECK (length(binding_digest) = 64),
+                recorded_at         TEXT NOT NULL,
+                CHECK (revoked_at IS NULL OR revoked_at >= valid_from),
+                UNIQUE(actor_id, binding_epoch)
+            );
+            CREATE INDEX IF NOT EXISTS idx_actor_profile_bindings_resolve
+                ON actor_profile_bindings(actor_id, valid_from, expires_at, revoked_at);
+
+            CREATE TABLE IF NOT EXISTS profile_routing_receipts (
+                receipt_id                    TEXT PRIMARY KEY,
+                requester_actor_id            TEXT NOT NULL REFERENCES actors(actor_id),
+                subject_profile_id            TEXT NOT NULL REFERENCES memory_profiles(profile_id),
+                authorization_snapshot_digest TEXT NOT NULL CHECK (length(authorization_snapshot_digest) = 64),
+                receipt_json                  TEXT NOT NULL CHECK (json_valid(receipt_json)),
+                receipt_digest                TEXT NOT NULL CHECK (length(receipt_digest) = 64),
+                recorded_at                   TEXT NOT NULL
+            );
+            CREATE INDEX IF NOT EXISTS idx_profile_routing_receipts_actor
+                ON profile_routing_receipts(requester_actor_id, recorded_at DESC);
 
             CREATE TABLE IF NOT EXISTS audit_events (
                 event_id TEXT PRIMARY KEY,
@@ -870,6 +1004,11 @@ impl MnemesStore {
             }
         }
 
+        conn.execute("DELETE FROM _pooled_schema_version", [])?;
+        conn.execute(
+            "INSERT INTO _pooled_schema_version(version, applied_at) VALUES (?1, datetime('now'))",
+            [POOLED_SCHEMA_GENERATION],
+        )?;
         let schema_generation = conn.query_row(
             "SELECT MAX(version) FROM _pooled_schema_version",
             [],
@@ -1588,6 +1727,470 @@ impl MnemesStore {
             namespace,
             at,
         )
+    }
+
+    /// Persist one operator-issued actor-to-profile subject transition.
+    pub async fn bind_actor_profile(
+        &self,
+        mut binding: ActorProfileBinding,
+    ) -> Result<ActorProfileBindingId, MnemesError> {
+        binding.validate()?;
+        let valid_from = i64::try_from(binding.valid_from).map_err(|_| {
+            MnemesError::ActorProfileBindingDenied(
+                "binding valid_from exceeds SQLite range".to_string(),
+            )
+        })?;
+        let expires_at = i64::try_from(binding.expires_at).map_err(|_| {
+            MnemesError::ActorProfileBindingDenied(
+                "binding expires_at exceeds SQLite range".to_string(),
+            )
+        })?;
+        let binding_epoch = i64::try_from(binding.binding_epoch).map_err(|_| {
+            MnemesError::ActorProfileBindingDenied("binding epoch exceeds SQLite range".to_string())
+        })?;
+        let now = Utc::now().to_rfc3339();
+        let conn = self.pool_conn.lock().await;
+        let issuer_is_operator: Option<bool> = conn
+            .query_row(
+                "SELECT a.tool_profile = 'operator' AND d.status = 'active'
+                 FROM actors a JOIN devices d ON d.device_id = a.device_id
+                 WHERE a.actor_id = ?1",
+                params![binding.issued_by_actor_id.as_str()],
+                |row| row.get(0),
+            )
+            .optional()?;
+        if issuer_is_operator != Some(true) {
+            return Err(MnemesError::ActorProfileBindingDenied(
+                "binding transitions require an active operator actor".to_string(),
+            ));
+        }
+        let actor_device: Option<(String, String)> = conn
+            .query_row(
+                "SELECT a.device_id, d.status FROM actors a
+                 JOIN devices d ON d.device_id = a.device_id
+                 WHERE a.actor_id = ?1",
+                params![binding.actor_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((actor_device_id, actor_device_status)) = actor_device else {
+            return Err(MnemesError::ActorProfileBindingDenied(
+                "binding actor does not exist".to_string(),
+            ));
+        };
+        if actor_device_status != DeviceStatus::Active.as_str()
+            || actor_device_id != binding.owner_device_id.as_str()
+        {
+            return Err(MnemesError::ActorProfileBindingDenied(
+                "binding actor must belong to the active profile owner device".to_string(),
+            ));
+        }
+        let profile_owner: Option<(String, String)> = conn
+            .query_row(
+                "SELECT p.owner_device_id, d.status FROM memory_profiles p
+                 JOIN devices d ON d.device_id = p.owner_device_id
+                 WHERE p.profile_id = ?1 AND p.status = 'active'",
+                params![binding.profile_id.as_str()],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?;
+        let Some((profile_owner_device, profile_owner_status)) = profile_owner else {
+            return Err(MnemesError::ActorProfileBindingDenied(
+                "binding profile is not active or does not exist".to_string(),
+            ));
+        };
+        if profile_owner_status != DeviceStatus::Active.as_str()
+            || profile_owner_device != binding.owner_device_id.as_str()
+        {
+            return Err(MnemesError::ActorProfileBindingDenied(
+                "binding owner device must equal the active profile owner".to_string(),
+            ));
+        }
+        let overlap_exists: bool = conn.query_row(
+            "SELECT EXISTS(
+                 SELECT 1 FROM actor_profile_bindings
+                 WHERE actor_id = ?1 AND revoked_at IS NULL
+                   AND valid_from < ?2 AND expires_at > ?3
+             )",
+            params![binding.actor_id.as_str(), expires_at, valid_from],
+            |row| row.get(0),
+        )?;
+        if overlap_exists {
+            return Err(MnemesError::ActorProfileBindingDenied(
+                "an overlapping active binding already exists for this actor".to_string(),
+            ));
+        }
+        binding.recorded_at = now;
+        conn.execute(
+            "INSERT INTO actor_profile_bindings(
+                binding_id, actor_id, profile_id, owner_device_id, issued_by_actor_id,
+                valid_from, expires_at, revoked_at, binding_epoch, binding_digest, recorded_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, NULL, ?8, ?9, ?10)",
+            params![
+                binding.binding_id.as_str(),
+                binding.actor_id.as_str(),
+                binding.profile_id.as_str(),
+                binding.owner_device_id.as_str(),
+                binding.issued_by_actor_id.as_str(),
+                valid_from,
+                expires_at,
+                binding_epoch,
+                binding.binding_digest,
+                binding.recorded_at,
+            ],
+        )?;
+        Ok(binding.binding_id)
+    }
+
+    /// Revoke one binding without deleting its issuance record.
+    pub async fn revoke_actor_profile_binding(
+        &self,
+        binding_id: &ActorProfileBindingId,
+        revoked_at: u64,
+    ) -> Result<(), MnemesError> {
+        let revoked_at = i64::try_from(revoked_at).map_err(|_| {
+            MnemesError::ActorProfileBindingDenied(
+                "binding revoked_at exceeds SQLite range".to_string(),
+            )
+        })?;
+        let conn = self.pool_conn.lock().await;
+        let affected = conn.execute(
+            "UPDATE actor_profile_bindings SET revoked_at = ?1
+             WHERE binding_id = ?2 AND revoked_at IS NULL",
+            params![revoked_at, binding_id.as_str()],
+        )?;
+        if affected == 0 {
+            return Err(MnemesError::ActorProfileBindingDenied(
+                "binding does not exist or is already revoked".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Resolve exactly one currently valid memory-profile subject for an actor.
+    pub async fn resolve_actor_profile(
+        &self,
+        actor_id: &ActorId,
+        at: u64,
+    ) -> Result<ActorProfileBinding, MnemesError> {
+        let at = i64::try_from(at).map_err(|_| {
+            MnemesError::ActorProfileBindingDenied(
+                "authorization time exceeds SQLite range".to_string(),
+            )
+        })?;
+        let conn = self.pool_conn.lock().await;
+        let mut statement = conn.prepare(
+            "SELECT b.binding_id, b.actor_id, b.profile_id, b.owner_device_id,
+                    b.issued_by_actor_id, b.valid_from, b.expires_at, b.revoked_at,
+                    b.binding_epoch, b.binding_digest, b.recorded_at,
+                    a.device_id, ad.status, p.owner_device_id, p.status, pd.status
+             FROM actor_profile_bindings b
+             JOIN actors a ON a.actor_id = b.actor_id
+             JOIN devices ad ON ad.device_id = a.device_id
+             JOIN memory_profiles p ON p.profile_id = b.profile_id
+             JOIN devices pd ON pd.device_id = p.owner_device_id
+             WHERE b.actor_id = ?1 AND b.revoked_at IS NULL
+               AND b.valid_from <= ?2 AND b.expires_at > ?2
+             ORDER BY b.binding_epoch ASC, b.binding_id ASC",
+        )?;
+        let rows = statement
+            .query_map(params![actor_id.as_str(), at], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, i64>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, Option<i64>>(7)?,
+                    row.get::<_, i64>(8)?,
+                    row.get::<_, String>(9)?,
+                    row.get::<_, String>(10)?,
+                    row.get::<_, String>(11)?,
+                    row.get::<_, String>(12)?,
+                    row.get::<_, String>(13)?,
+                    row.get::<_, String>(14)?,
+                    row.get::<_, String>(15)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        if rows.len() != 1 {
+            return Err(MnemesError::ActorProfileBindingDenied(if rows.is_empty() {
+                "no active binding exists for this actor".to_string()
+            } else {
+                "multiple active bindings exist for this actor".to_string()
+            }));
+        }
+        let row = rows.into_iter().next().expect("exactly one checked above");
+        let binding = ActorProfileBinding {
+            binding_id: ActorProfileBindingId::parse(row.0)?,
+            actor_id: ActorId::parse(row.1)?,
+            profile_id: MemoryProfileId::parse(row.2)?,
+            owner_device_id: DeviceId::parse(row.3)?,
+            issued_by_actor_id: ActorId::parse(row.4)?,
+            valid_from: u64::try_from(row.5).map_err(|_| {
+                MnemesError::ActorProfileBindingDenied("negative binding valid_from".to_string())
+            })?,
+            expires_at: u64::try_from(row.6).map_err(|_| {
+                MnemesError::ActorProfileBindingDenied("negative binding expires_at".to_string())
+            })?,
+            revoked_at: row
+                .7
+                .map(|value| {
+                    u64::try_from(value).map_err(|_| {
+                        MnemesError::ActorProfileBindingDenied(
+                            "negative binding revoked_at".to_string(),
+                        )
+                    })
+                })
+                .transpose()?,
+            binding_epoch: u64::try_from(row.8).map_err(|_| {
+                MnemesError::ActorProfileBindingDenied("negative binding epoch".to_string())
+            })?,
+            binding_digest: row.9,
+            recorded_at: row.10,
+        };
+        binding.validate()?;
+        if row.11 != binding.owner_device_id.as_str()
+            || row.13 != binding.owner_device_id.as_str()
+            || row.12 != DeviceStatus::Active.as_str()
+            || row.14 != MemoryProfileStatus::Active.as_str()
+            || row.15 != DeviceStatus::Active.as_str()
+        {
+            return Err(MnemesError::ActorProfileBindingDenied(
+                "binding actor, profile, and owner-device lifecycle relation is invalid"
+                    .to_string(),
+            ));
+        }
+        Ok(binding)
+    }
+
+    /// Derive a request-local snapshot before any store ranking or opening.
+    pub async fn build_authorization_snapshot(
+        &self,
+        actor_id: &ActorId,
+        effect: MemoryAccessEffect,
+        namespaces: Option<&[String]>,
+        at: u64,
+    ) -> Result<AuthorizationSnapshot, MnemesError> {
+        let binding = self.resolve_actor_profile(actor_id, at).await?;
+        let requested_namespaces = namespaces.map_or_else(Vec::new, ToOwned::to_owned);
+        let profile = MemoryProfile {
+            profile_id: binding.profile_id.clone(),
+            owner_device_id: binding.owner_device_id.clone(),
+            label: "authorization subject".to_string(),
+            status: MemoryProfileStatus::Active,
+            created_at: String::new(),
+        };
+        let stores = {
+            let conn = self.pool_conn.lock().await;
+            let mut statement = conn.prepare(
+                "SELECT s.store_id, s.profile_id, s.owner_device_id, s.namespace, s.relative_path,
+                        s.status, s.created_at
+                 FROM memory_stores s
+                 JOIN memory_profiles p ON p.profile_id = s.profile_id
+                 JOIN devices d ON d.device_id = s.owner_device_id
+                 WHERE s.status = 'active' AND p.status = 'active' AND d.status = 'active'
+                 ORDER BY s.store_id ASC",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, String>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, String>(3)?,
+                        row.get::<_, String>(4)?,
+                        row.get::<_, String>(5)?,
+                        row.get::<_, String>(6)?,
+                    ))
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        let mut authorized_stores = Vec::new();
+        for row in stores {
+            let store = MemoryStoreIdentity {
+                store_id: row.0,
+                profile_id: MemoryProfileId::parse(row.1)?,
+                owner_device_id: DeviceId::parse(row.2)?,
+                namespace: row.3,
+                relative_path: row.4,
+                status: MemoryStoreStatus::parse(&row.5)?,
+                created_at: row.6,
+            };
+            if !requested_namespaces.is_empty()
+                && !requested_namespaces
+                    .iter()
+                    .any(|namespace| namespace == &store.namespace)
+            {
+                continue;
+            }
+            let grants = self
+                .memory_grants_for_profile_store(&binding.profile_id, &store.store_id)
+                .await?;
+            if authorize_memory_access(
+                &binding.profile_id,
+                &profile,
+                &store,
+                &grants,
+                effect,
+                &store.namespace,
+                at,
+            )
+            .is_err()
+            {
+                continue;
+            }
+            let mut grant_ids = grants
+                .iter()
+                .filter(|grant| grant.allows(effect, &store.namespace, at))
+                .map(|grant| grant.grant_id.clone())
+                .collect::<Vec<_>>();
+            grant_ids.sort_by(|left, right| left.as_str().cmp(right.as_str()));
+            let authorization_expires_at = grants
+                .iter()
+                .filter(|grant| grant.allows(effect, &store.namespace, at))
+                .map(|grant| grant.expires_at)
+                .min()
+                .unwrap_or(binding.expires_at)
+                .min(binding.expires_at);
+            authorized_stores.push(AuthorizedMemoryStore {
+                store_id: store.store_id,
+                profile_id: store.profile_id,
+                owner_device_id: store.owner_device_id,
+                namespace: store.namespace,
+                relative_path: store.relative_path,
+                grant_ids,
+                authorization_expires_at,
+            });
+        }
+        Ok(AuthorizationSnapshot::new(
+            &binding,
+            effect,
+            requested_namespaces,
+            authorized_stores,
+            at,
+        ))
+    }
+
+    /// Validate a snapshot against current control-plane state before use.
+    pub async fn validate_authorization_snapshot(
+        &self,
+        snapshot: &AuthorizationSnapshot,
+        at: u64,
+    ) -> Result<(), MnemesError> {
+        snapshot.validate()?;
+        if snapshot.evaluated_at != at {
+            return Err(MnemesError::AuthorizationSnapshotInvalid(
+                "snapshot evaluation time does not match request authorization time".to_string(),
+            ));
+        }
+        let namespaces =
+            (!snapshot.namespaces.is_empty()).then_some(snapshot.namespaces.as_slice());
+        let current = self
+            .build_authorization_snapshot(&snapshot.actor_id, snapshot.effect, namespaces, at)
+            .await?;
+        if current.snapshot_digest != snapshot.snapshot_digest {
+            return Err(MnemesError::AuthorizationSnapshotInvalid(
+                "snapshot no longer matches current binding, lifecycle, or grants".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
+    /// Return only stores admitted by a current validated snapshot.
+    pub async fn list_authorized_stores(
+        &self,
+        snapshot: &AuthorizationSnapshot,
+        at: u64,
+    ) -> Result<Vec<AuthorizedMemoryStore>, MnemesError> {
+        self.validate_authorization_snapshot(snapshot, at).await?;
+        Ok(snapshot.authorized_stores.clone())
+    }
+
+    /// Issue a bounded request permit from a current snapshot; it is not durable authority.
+    pub async fn issue_memory_access_permit(
+        &self,
+        snapshot: &AuthorizationSnapshot,
+        store_id: &str,
+        namespace: &str,
+        at: u64,
+        query_budget: usize,
+    ) -> Result<MemoryAccessPermit, MnemesError> {
+        self.validate_authorization_snapshot(snapshot, at).await?;
+        let store = snapshot
+            .authorized_stores
+            .iter()
+            .find(|store| store.store_id == store_id && store.namespace == namespace)
+            .ok_or_else(|| {
+                MnemesError::MemoryGrantDenied(
+                    "store is not admitted by the authorization snapshot".to_string(),
+                )
+            })?;
+        let expires_at = store.authorization_expires_at.min(at.saturating_add(60));
+        MemoryAccessPermit::new(snapshot, store, at, expires_at, query_budget)
+    }
+
+    async fn memory_grants_for_profile_store(
+        &self,
+        requester_profile_id: &MemoryProfileId,
+        store_id: &str,
+    ) -> Result<Vec<MemoryAccessGrant>, MnemesError> {
+        let conn = self.pool_conn.lock().await;
+        let mut statement = conn.prepare(
+            "SELECT grant_id, grantee_profile_id, store_id, namespace, effect,
+                    issued_by_actor_id, valid_from, expires_at, revoked_at, created_at
+             FROM memory_access_grants
+             WHERE grantee_profile_id = ?1 AND store_id = ?2
+             ORDER BY valid_from ASC, grant_id ASC",
+        )?;
+        let rows = statement
+            .query_map(params![requester_profile_id.as_str(), store_id], |row| {
+                Ok((
+                    row.get::<_, String>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, String>(4)?,
+                    row.get::<_, String>(5)?,
+                    row.get::<_, i64>(6)?,
+                    row.get::<_, i64>(7)?,
+                    row.get::<_, Option<i64>>(8)?,
+                    row.get::<_, String>(9)?,
+                ))
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        rows.into_iter()
+            .map(|row| {
+                Ok(MemoryAccessGrant {
+                    grant_id: MemoryGrantId::parse(row.0)?,
+                    grantee_profile_id: MemoryProfileId::parse(row.1)?,
+                    store_id: row.2,
+                    namespace: row.3,
+                    effect: MemoryAccessEffect::parse(&row.4)?,
+                    issued_by_actor_id: ActorId::parse(row.5)?,
+                    valid_from: u64::try_from(row.6).map_err(|_| {
+                        MnemesError::InvalidMemoryScope("negative grant valid_from".to_string())
+                    })?,
+                    expires_at: u64::try_from(row.7).map_err(|_| {
+                        MnemesError::InvalidMemoryScope("negative grant expires_at".to_string())
+                    })?,
+                    revoked_at: row
+                        .8
+                        .map(|value| {
+                            u64::try_from(value).map_err(|_| {
+                                MnemesError::InvalidMemoryScope(
+                                    "negative grant revoked_at".to_string(),
+                                )
+                            })
+                        })
+                        .transpose()?,
+                    created_at: row.9,
+                })
+            })
+            .collect()
     }
 
     /// Change a profile lifecycle state without deleting its history.
@@ -2515,6 +3118,58 @@ impl MnemesStore {
         Ok(store)
     }
 
+    /// Open one active profile store through its canonical store identity only.
+    ///
+    /// Unlike the legacy device-shard accessor this never creates a directory,
+    /// runs migrations, or returns a write-capable semantic-memory handle.
+    pub async fn profile_store_memory(
+        &self,
+        store_id: &str,
+    ) -> Result<Arc<semantic_memory::MemoryStore>, MnemesError> {
+        let (profile_id, relative_path): (String, String) = {
+            let conn = self.pool_conn.lock().await;
+            conn.query_row(
+                "SELECT s.profile_id, s.relative_path
+                 FROM memory_stores s
+                 JOIN memory_profiles p ON p.profile_id = s.profile_id
+                 JOIN devices d ON d.device_id = s.owner_device_id
+                 WHERE s.store_id = ?1 AND s.status = 'active'
+                   AND p.status = 'active' AND d.status = 'active'",
+                params![store_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .optional()?
+        }
+        .ok_or_else(|| {
+            MnemesError::MemoryGrantDenied(
+                "profile store is not active or does not exist".to_string(),
+            )
+        })?;
+        let profile_id = MemoryProfileId::parse(profile_id)?;
+        let expected = canonical_memory_store_relative_path(&profile_id, store_id)?;
+        if relative_path != expected {
+            return Err(MnemesError::InvalidMemoryScope(
+                "profile store path is not canonical".to_string(),
+            ));
+        }
+        let cache_key = format!("profile:{store_id}");
+        let mut cache = self.shard_cache.lock().await;
+        if let Some(store) = cache.get_key(&cache_key) {
+            return Ok(store);
+        }
+        let mut config = self.memory_config.clone();
+        config.base_dir = self.base_dir.join(relative_path);
+        let store = semantic_memory::MemoryStore::open_existing_read_only_with_embedder(
+            config,
+            Box::new(SharedEmbedder {
+                inner: self.embedder.clone(),
+            }),
+        )?;
+        let store = Arc::new(store);
+        cache.insert_key(&cache_key, store.clone());
+        Ok(store)
+    }
+
     /// Current cache metrics; does not open a shard.
     pub async fn shard_cache_metrics(&self) -> ShardCacheMetrics {
         let cache = self.shard_cache.lock().await;
@@ -2946,6 +3601,196 @@ impl MnemesStore {
             results,
             routing_receipt: receipt,
         })
+    }
+
+    /// Search only the stores admitted by the actor's current profile snapshot.
+    /// The request has no profile selector: subject resolution is server-side.
+    pub async fn routed_search_for_profile(
+        &self,
+        actor_id: &ActorId,
+        request: RoutingSearchRequest,
+        authorization_time: u64,
+    ) -> Result<ProfileRoutedSearchResponse, MnemesError> {
+        let snapshot = self
+            .build_authorization_snapshot(
+                actor_id,
+                MemoryAccessEffect::Search,
+                request.namespaces.as_deref(),
+                authorization_time,
+            )
+            .await?;
+        let authorized_stores = snapshot.authorized_stores.clone();
+        let selected_stores = authorized_stores
+            .iter()
+            .map(|store| store.store_id.clone())
+            .collect::<Vec<_>>();
+        let query_sha256 = sha256_hex(&request.query);
+        let mut outcomes = Vec::with_capacity(authorized_stores.len());
+        let mut results = Vec::new();
+        for authorized in &authorized_stores {
+            let started = Instant::now();
+            match self.profile_store_memory(&authorized.store_id).await {
+                Ok(memory) => {
+                    let namespaces = request
+                        .namespaces
+                        .as_ref()
+                        .map(|values| values.iter().map(String::as_str).collect::<Vec<_>>());
+                    match memory
+                        .search(
+                            &request.query,
+                            Some(request.top_k),
+                            namespaces.as_deref(),
+                            request.source_types.as_deref(),
+                        )
+                        .await
+                    {
+                        Ok(store_results) => {
+                            let result_count = store_results.len();
+                            results.extend(store_results.into_iter().map(|result| {
+                                ProfileRoutedSearchResult {
+                                    result,
+                                    store_id: authorized.store_id.clone(),
+                                    profile_id: authorized.profile_id.clone(),
+                                    owner_device_id: authorized.owner_device_id.clone(),
+                                    namespace: authorized.namespace.clone(),
+                                    child_search_receipt_id: None,
+                                }
+                            }));
+                            outcomes.push(ProfileStoreSearchOutcome {
+                                store_id: authorized.store_id.clone(),
+                                profile_id: authorized.profile_id.clone(),
+                                latency_ms: started.elapsed().as_millis().min(u128::from(u64::MAX))
+                                    as u64,
+                                result_count,
+                                child_search_receipt_id: None,
+                                error: None,
+                            });
+                        }
+                        Err(error) => outcomes.push(ProfileStoreSearchOutcome {
+                            store_id: authorized.store_id.clone(),
+                            profile_id: authorized.profile_id.clone(),
+                            latency_ms: started.elapsed().as_millis().min(u128::from(u64::MAX))
+                                as u64,
+                            result_count: 0,
+                            child_search_receipt_id: None,
+                            error: Some(error.to_string()),
+                        }),
+                    }
+                }
+                Err(error) => outcomes.push(ProfileStoreSearchOutcome {
+                    store_id: authorized.store_id.clone(),
+                    profile_id: authorized.profile_id.clone(),
+                    latency_ms: started.elapsed().as_millis().min(u128::from(u64::MAX)) as u64,
+                    result_count: 0,
+                    child_search_receipt_id: None,
+                    error: Some(error.to_string()),
+                }),
+            }
+        }
+        results.sort_by(|left, right| {
+            right
+                .result
+                .score
+                .total_cmp(&left.result.score)
+                .then_with(|| {
+                    left.result
+                        .source
+                        .result_id()
+                        .cmp(&right.result.source.result_id())
+                })
+                .then_with(|| left.store_id.cmp(&right.store_id))
+        });
+        let mut content_by_id = HashMap::<String, String>::new();
+        let mut emitted = HashSet::<String>::new();
+        let mut merged = Vec::new();
+        for result in results {
+            let result_id = result.result.source.result_id();
+            if let Some(existing) = content_by_id.get(&result_id) {
+                if existing != &result.result.content {
+                    return Err(MnemesError::ConflictingShardItem { item_id: result_id });
+                }
+            } else {
+                content_by_id.insert(result_id.clone(), result.result.content.clone());
+            }
+            if emitted.insert(result_id) {
+                merged.push(result);
+            }
+        }
+        merged.truncate(request.top_k);
+        let final_result_ids = merged
+            .iter()
+            .map(|result| result.result.source.result_id())
+            .collect::<Vec<_>>();
+        let mut receipt = ProfileRoutingReceipt {
+            receipt_id: uuid::Uuid::new_v4().to_string(),
+            actor_id: actor_id.clone(),
+            subject_profile_id: snapshot.subject_profile_id.clone(),
+            authorization_snapshot_digest: snapshot.snapshot_digest.clone(),
+            authorized_stores,
+            selected_stores,
+            skipped_stores: Vec::new(),
+            complete: outcomes.iter().all(|outcome| outcome.error.is_none()),
+            outcomes,
+            final_result_ids,
+            query_sha256,
+            receipt_digest: String::new(),
+            recorded_at: Utc::now().to_rfc3339(),
+        };
+        receipt.receipt_digest = profile_routing_receipt_digest(&self.receipt_auth_key, &receipt)?;
+        validate_profile_routing_receipt(&self.receipt_auth_key, &receipt)?;
+        self.persist_profile_routing_receipt(&receipt).await?;
+        Ok(ProfileRoutedSearchResponse {
+            results: merged,
+            routing_receipt: receipt,
+        })
+    }
+
+    async fn persist_profile_routing_receipt(
+        &self,
+        receipt: &ProfileRoutingReceipt,
+    ) -> Result<(), MnemesError> {
+        validate_profile_routing_receipt(&self.receipt_auth_key, receipt)?;
+        let payload = serde_json::to_string(receipt)
+            .map_err(|error| MnemesError::InvalidShardCatalog(error.to_string()))?;
+        let conn = self.pool_conn.lock().await;
+        conn.execute(
+            "INSERT INTO profile_routing_receipts(
+                receipt_id, requester_actor_id, subject_profile_id,
+                authorization_snapshot_digest, receipt_json, receipt_digest, recorded_at
+             ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+            params![
+                receipt.receipt_id,
+                receipt.actor_id.as_str(),
+                receipt.subject_profile_id.as_str(),
+                receipt.authorization_snapshot_digest,
+                payload,
+                receipt.receipt_digest,
+                receipt.recorded_at,
+            ],
+        )?;
+        Ok(())
+    }
+
+    /// Read and authenticate one durable profile routing receipt.
+    pub async fn get_profile_routing_receipt(
+        &self,
+        receipt_id: &str,
+    ) -> Result<Option<ProfileRoutingReceipt>, MnemesError> {
+        let conn = self.pool_conn.lock().await;
+        let payload = conn
+            .query_row(
+                "SELECT receipt_json FROM profile_routing_receipts WHERE receipt_id = ?1",
+                params![receipt_id],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()?;
+        let Some(payload) = payload else {
+            return Ok(None);
+        };
+        let receipt = serde_json::from_str::<ProfileRoutingReceipt>(&payload)
+            .map_err(|error| MnemesError::InvalidShardCatalog(error.to_string()))?;
+        validate_profile_routing_receipt(&self.receipt_auth_key, &receipt)?;
+        Ok(Some(receipt))
     }
 
     async fn persist_routing_receipt(
@@ -4811,7 +5656,7 @@ mod tests {
             owner_profile.profile_id.clone(),
             owner_device.clone(),
             "private",
-            "memory/shards/owner-profile",
+            "memory/profiles/owner-profile/owner-store",
         )
         .unwrap();
         store
@@ -4915,6 +5760,122 @@ mod tests {
             )
             .await
             .is_err());
+    }
+
+    #[tokio::test]
+    async fn actor_profile_binding_drives_a_deterministic_revocable_authorization_snapshot() {
+        let (store, _dir) = open_test_store();
+        let owner_device = DeviceId::new();
+        let requester_device = DeviceId::new();
+        store
+            .register_device(Device::new(
+                owner_device.clone(),
+                "owner",
+                "linux",
+                "owner-host",
+            ))
+            .await
+            .unwrap();
+        store
+            .register_device(Device::new(
+                requester_device.clone(),
+                "requester",
+                "linux",
+                "requester-host",
+            ))
+            .await
+            .unwrap();
+
+        let operator_id = ActorId::new();
+        let mut operator = Actor::new(operator_id.clone(), owner_device, ActorKind::Human);
+        operator.tool_profile = ToolProfile::Operator;
+        store.register_actor(operator).await.unwrap();
+
+        let requester_actor_id = ActorId::new();
+        store
+            .register_actor(Actor::new(
+                requester_actor_id.clone(),
+                requester_device.clone(),
+                ActorKind::Hermes,
+            ))
+            .await
+            .unwrap();
+
+        let requester_profile = MemoryProfile::new(
+            MemoryProfileId::new("requester-profile").unwrap(),
+            requester_device.clone(),
+            "Requester profile",
+        )
+        .unwrap();
+        store
+            .register_memory_profile(requester_profile.clone())
+            .await
+            .unwrap();
+        let own_store = MemoryStoreIdentity::new(
+            "requester-store",
+            requester_profile.profile_id.clone(),
+            requester_device.clone(),
+            "private",
+            "memory/profiles/requester-profile/requester-store",
+        )
+        .unwrap();
+        store
+            .register_memory_store(own_store.clone())
+            .await
+            .unwrap();
+
+        let binding = ActorProfileBinding::new(
+            requester_actor_id.clone(),
+            requester_profile.profile_id.clone(),
+            requester_device,
+            operator_id,
+            10,
+            20,
+            1,
+        )
+        .unwrap();
+        let binding_id = binding.binding_id.clone();
+        store.bind_actor_profile(binding).await.unwrap();
+
+        let snapshot = store
+            .build_authorization_snapshot(&requester_actor_id, MemoryAccessEffect::Search, None, 11)
+            .await
+            .unwrap();
+        assert_eq!(snapshot.subject_profile_id, requester_profile.profile_id);
+        assert_eq!(snapshot.binding_id, binding_id);
+        assert_eq!(snapshot.authorized_stores.len(), 1);
+        assert_eq!(snapshot.authorized_stores[0].store_id, own_store.store_id);
+        assert!(store
+            .validate_authorization_snapshot(&snapshot, 11)
+            .await
+            .is_ok());
+
+        let permit = store
+            .issue_memory_access_permit(&snapshot, &own_store.store_id, "private", 11, 5)
+            .await
+            .unwrap();
+        assert_eq!(permit.subject_profile_id, requester_profile.profile_id);
+        assert_eq!(permit.store_id, own_store.store_id);
+
+        store
+            .revoke_actor_profile_binding(&binding_id, 12)
+            .await
+            .unwrap();
+        assert!(store
+            .validate_authorization_snapshot(&snapshot, 12)
+            .await
+            .is_err());
+        assert!(
+            store
+                .build_authorization_snapshot(
+                    &requester_actor_id,
+                    MemoryAccessEffect::Search,
+                    None,
+                    12,
+                )
+                .await
+                .is_err()
+        );
     }
 
     #[test]
