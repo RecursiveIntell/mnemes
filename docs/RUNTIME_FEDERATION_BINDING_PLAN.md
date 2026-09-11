@@ -1,6 +1,6 @@
 # Runtime Federation Binding — Detailed Implementation Plan
 
-**Status:** Plan complete; runtime federation implementation intentionally not started; locally implemented control-plane contract at `0abac8446f6c2aa4630aa10088d58b17f22ab1ac`
+**Status:** Local profile-bound routing and its REST/MCP admission slice are implemented; remote federation remains intentionally unimplemented.
 **Plan owner:** Mnemes source owner (`RecursiveIntell/mnemes`)
 **Evidence cutoff:** 2026-09-10T20:18:47Z
 **Source snapshot:** implementation commit `0abac8446f6c2aa4630aa10088d58b17f22ab1ac`; the exact current publication candidate is recorded by the bounded publication receipt, not inferred from this evolving plan document.
@@ -35,7 +35,7 @@ A request that cannot establish every link fails closed. There is no fallback fr
 
 Observed in the isolated source snapshot:
 
-- The candidate adds locally tested profile/store/grant control-plane types and persistence helpers. These are not yet consumed by runtime profile-bound routing or HTTP/MCP search.
+- The candidate adds locally tested profile/store/grant control-plane types, local profile-bound routing, and an authenticated REST/MCP admission slice. The route derives the profile subject from the authenticated actor binding and never accepts a caller-authoritative profile or store selector.
 - `src/profile_store.rs` now owns `MemoryProfileId`, `MemoryProfile`, `MemoryStoreIdentity`, `MemoryAccessGrant`, lifecycle states, bounded effects/time windows, and the pure deterministic authorizer.
 - `src/store.rs` owns the `pooled.db` schema and currently persists `memory_profiles`, `memory_stores`, and `memory_access_grants`.
 - Profile/store registration checks active device ownership and path safety.
@@ -60,19 +60,15 @@ The current Mnemes documentation establishes these source-owner boundaries:
 - Search receipts prove retrieval execution, not truth or permission to act.
 - Replication requires typed canonical mutation payloads; a digest-only journal cannot be converted into invented replay data.
 
-### 2.3 Current gap
+### 2.3 Remaining gaps
 
-The current implementation has a grant control plane but no runtime consumer. Specifically:
+The local admission slice resolves a profile from an authenticated actor binding, filters stores through the grant snapshot before opening them, and returns a persisted profile-routing receipt. The remaining gaps are:
 
-1. An authenticated actor has no canonical memory-profile subject binding.
-2. A search request can identify a device but cannot establish which profile is acting.
-3. A device shard is not canonically mapped to a profile-owned store.
-4. `routed_search` ranks device shards before any profile/store grant filtering.
-5. Search receipts do not bind an authorization snapshot, profile subject, store grant IDs/digest, or profile-owned store identity.
-6. The current HTTP/MCP path has no profile/store/grant lifecycle API.
-7. Remote trust-domain federation, peer key lifecycle, and sender-constrained transport identity are not implemented.
+1. Legacy `/v1/search/witnessed` and `sm_search_witnessed` remain compatibility paths and are not profile-governed.
+2. No HTTP/MCP profile/store/grant lifecycle API is exposed.
+3. Remote trust-domain federation, peer key lifecycle, sender-constrained transport identity, deployment, and activation are not implemented.
 
-These are observed source facts. They are not a claim that the current Mnemes server is already profile-federated.
+These are observed source facts. They are not a claim that the current Mnemes server is profile-federated or deployed.
 
 ## 3. Research basis and decisions
 
@@ -707,9 +703,9 @@ Revisit this plan when any of the following changes:
 Until then, the strongest supportable state is:
 
 ```text
-Mnemes profile/store/grant control plane: implemented on an isolated local candidate; exact publication-head validation remains required.
-Local actor-bound, grant-filtered profile routing: implemented on the isolated candidate with negative authorization, revocation, partial-store, and receipt read-back tests.
-HTTP/MCP profile-bound route: not implemented or active.
+Mnemes profile/store/grant control plane: locally implemented; exact publication-head validation remains required.
+Local actor-bound, grant-filtered profile routing: locally implemented with negative authorization, revocation, partial-store, and receipt read-back tests.
+HTTP/MCP profile-bound route: implemented and locally tested on the candidate; it is not deployed or active.
 Remote federation: not admitted.
 Production readiness: not claimed.
 ```
@@ -753,4 +749,4 @@ The plan is complete when:
 - the Hermes repository/PR exclusion is explicit.
 
 **Current plan state:** complete.
-**Implementation state:** not started from this plan.
+**Implementation state:** local profile-bound routing and REST/MCP admission are implemented; deployment and remote federation are not.

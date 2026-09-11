@@ -4,7 +4,11 @@ use mnemes::replication::{
     SignedFactSupersedeBatchV1,
 };
 use mnemes::server::{build_memory_store, build_router, build_staged_fact_supersede_router};
-use mnemes::{Device, DeviceId, FactCreateAdmission, FactSupersedeAdmission, MnemesStore};
+use mnemes::{
+    canonical_memory_store_relative_path, Actor, ActorId, ActorProfileBinding, Device, DeviceId,
+    FactCreateAdmission, FactSupersedeAdmission, MemoryProfile, MemoryProfileId,
+    MemoryStoreIdentity, MnemesStore,
+};
 use reqwest::{Client, StatusCode};
 use semantic_memory::journal::{
     encode_fact_create_payload, envelope_digest, export_verified_contiguous, payload_digest,
@@ -1384,6 +1388,208 @@ async fn mcp_and_http_witnessed_search_has_durable_receipt() {
         mcp_body["result"]["results"][0]["item_id"].as_str(),
         http_body["results"][0]["item_id"].as_str(),
     );
+}
+
+struct ProfileSearchFixture {
+    device: DeviceIdentity,
+    actor: ActorIdentity,
+    profile_id: String,
+}
+
+async fn prepare_bound_profile_search_fixture(
+    store: &MnemesStore,
+    base: &std::path::Path,
+) -> ProfileSearchFixture {
+    let device_id = DeviceId::new();
+    let (_, credential) = store
+        .register_device_with_generated_credential(Device::new(
+            device_id.clone(),
+            "profile-search-device",
+            "linux",
+            "localhost",
+        ))
+        .await
+        .unwrap();
+    let mut operator = Actor::new(ActorId::new(), device_id.clone(), mnemes::ActorKind::Hermes);
+    operator.tool_profile = mnemes::ToolProfile::Operator;
+    let operator_id = operator.actor_id.clone();
+    store.register_actor(operator).await.unwrap();
+    let actor = Actor::new(ActorId::new(), device_id.clone(), mnemes::ActorKind::Hermes);
+    let actor_id = actor.actor_id.clone();
+    store.register_actor(actor).await.unwrap();
+    let profile = MemoryProfile::new(
+        MemoryProfileId::new("http-profile").unwrap(),
+        device_id.clone(),
+        "HTTP profile",
+    )
+    .unwrap();
+    store
+        .register_memory_profile(profile.clone())
+        .await
+        .unwrap();
+    store
+        .bind_actor_profile(
+            ActorProfileBinding::new(
+                actor_id.clone(),
+                profile.profile_id.clone(),
+                device_id.clone(),
+                operator_id,
+                0,
+                i64::MAX as u64,
+                1,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    let relative_path =
+        canonical_memory_store_relative_path(&profile.profile_id, "http-store").unwrap();
+    let physical = MemoryStore::open_with_embedder(
+        MemoryConfig {
+            base_dir: base.join(&relative_path),
+            ..Default::default()
+        },
+        Box::new(MockEmbedder::new(768)),
+    )
+    .unwrap();
+    physical
+        .add_fact(
+            "private",
+            "The profile witness saw the blue fox.",
+            None,
+            None,
+        )
+        .await
+        .unwrap();
+    store
+        .register_memory_store(
+            MemoryStoreIdentity::new(
+                "http-store",
+                profile.profile_id.clone(),
+                profile.owner_device_id.clone(),
+                "private",
+                relative_path,
+            )
+            .unwrap(),
+        )
+        .await
+        .unwrap();
+    ProfileSearchFixture {
+        device: DeviceIdentity {
+            device_id: device_id.to_string(),
+            credential,
+        },
+        actor: ActorIdentity {
+            actor_id: actor_id.to_string(),
+        },
+        profile_id: profile.profile_id.to_string(),
+    }
+}
+
+#[tokio::test]
+async fn profile_bound_rest_and_mcp_search_derive_subject_and_read_back_receipts() {
+    let (temp, store) = open_store().await;
+    let fixture = prepare_bound_profile_search_fixture(&store, temp.path()).await;
+    let server = spawn_server_with_store(temp, store).await;
+    let client = Client::new();
+    let device = fixture.device;
+    let actor = fixture.actor;
+    let profile_id = fixture.profile_id;
+
+    let rest = client
+        .post(format!("{}/v1/search/profile/witnessed", server.base_url))
+        .bearer_auth(&device.credential)
+        .json(&json!({"actor_id": actor.actor_id, "query": "blue fox", "source_types": ["facts"]}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(rest.status(), StatusCode::OK);
+    let rest: Value = rest.json().await.unwrap();
+    assert_eq!(rest["receipt"]["subject_profile_id"], profile_id);
+    assert_eq!(rest["receipt_stored"], true);
+
+    let mcp = client
+        .post(format!("{}/v1/mcp", server.base_url))
+        .bearer_auth(&device.credential)
+        .json(&json!({
+            "method": "tools/call",
+            "params": {"actor_id": actor.actor_id, "name": "sm_search_profile_witnessed", "arguments": {"query": "blue fox", "source_types": ["facts"]}},
+            "id": 1,
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mcp.status(), StatusCode::OK);
+    let mcp: Value = mcp.json().await.unwrap();
+    assert_eq!(mcp["result"]["receipt"]["subject_profile_id"], profile_id);
+    assert_eq!(mcp["result"]["receipt_stored"], true);
+    assert_eq!(rest["results"], mcp["result"]["results"]);
+    assert_eq!(
+        rest["receipt"]["subject_profile_id"],
+        mcp["result"]["receipt"]["subject_profile_id"]
+    );
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn profile_bound_search_denies_unbound_actor_before_opening_a_profile_store() {
+    let (temp, store) = open_store().await;
+    let fixture = prepare_bound_profile_search_fixture(&store, temp.path()).await;
+    let unbound_actor = Actor::new(
+        ActorId::new(),
+        DeviceId::parse(&fixture.device.device_id).unwrap(),
+        mnemes::ActorKind::Hermes,
+    );
+    let unbound_actor_id = unbound_actor.actor_id.to_string();
+    store.register_actor(unbound_actor).await.unwrap();
+    let server = spawn_server_with_store(temp, store).await;
+    let client = Client::new();
+
+    let denied = client
+        .post(format!("{}/v1/search/profile/witnessed", server.base_url))
+        .bearer_auth(&fixture.device.credential)
+        .json(&json!({"actor_id": unbound_actor_id, "query": "blue fox"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied.status(), StatusCode::FORBIDDEN);
+    server.stop().await;
+}
+
+#[tokio::test]
+async fn profile_bound_search_rejects_selectors_and_actor_device_substitution() {
+    let (temp, store) = open_store().await;
+    let fixture = prepare_bound_profile_search_fixture(&store, temp.path()).await;
+    let (_, other_credential) = store
+        .register_device_with_generated_credential(Device::new(
+            DeviceId::new(),
+            "other-device",
+            "linux",
+            "localhost",
+        ))
+        .await
+        .unwrap();
+    let server = spawn_server_with_store(temp, store).await;
+    let client = Client::new();
+
+    let selector = client
+        .post(format!("{}/v1/search/profile/witnessed", server.base_url))
+        .bearer_auth(&fixture.device.credential)
+        .json(&json!({"actor_id": fixture.actor.actor_id, "query": "blue fox", "profile_id": "foreign-profile"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(selector.status(), StatusCode::BAD_REQUEST);
+
+    let mismatch = client
+        .post(format!("{}/v1/search/profile/witnessed", server.base_url))
+        .bearer_auth(&other_credential)
+        .json(&json!({"actor_id": fixture.actor.actor_id, "query": "blue fox"}))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(mismatch.status(), StatusCode::FORBIDDEN);
+    server.stop().await;
 }
 
 #[tokio::test]
