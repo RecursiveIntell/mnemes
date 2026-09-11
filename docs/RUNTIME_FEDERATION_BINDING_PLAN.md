@@ -1,6 +1,6 @@
 # Runtime Federation Binding — Detailed Implementation Plan
 
-**Status:** Plan complete; runtime federation implementation intentionally not started; locally implemented control-plane contract at `0abac8446f6c2aa4630aa10088d58b17f22ab1ac`
+**Status:** Local profile-bound routing and its REST/MCP admission slice are implemented; remote federation remains intentionally unimplemented.
 **Plan owner:** Mnemes source owner (`RecursiveIntell/mnemes`)
 **Evidence cutoff:** 2026-09-10T20:18:47Z
 **Source snapshot:** implementation commit `0abac8446f6c2aa4630aa10088d58b17f22ab1ac`; the exact current publication candidate is recorded by the bounded publication receipt, not inferred from this evolving plan document.
@@ -35,7 +35,7 @@ A request that cannot establish every link fails closed. There is no fallback fr
 
 Observed in the isolated source snapshot:
 
-- The candidate adds locally tested profile/store/grant control-plane types and persistence helpers. These are not yet consumed by runtime profile-bound routing or HTTP/MCP search.
+- The candidate adds locally tested profile/store/grant control-plane types, local profile-bound routing, and an authenticated REST/MCP admission slice. The route derives the profile subject from the authenticated actor binding and never accepts a caller-authoritative profile or store selector.
 - `src/profile_store.rs` now owns `MemoryProfileId`, `MemoryProfile`, `MemoryStoreIdentity`, `MemoryAccessGrant`, lifecycle states, bounded effects/time windows, and the pure deterministic authorizer.
 - `src/store.rs` owns the `pooled.db` schema and currently persists `memory_profiles`, `memory_stores`, and `memory_access_grants`.
 - Profile/store registration checks active device ownership and path safety.

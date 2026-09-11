@@ -246,6 +246,14 @@ struct WitnessedSearchResponse {
 }
 
 #[cfg(feature = "server")]
+#[derive(Serialize)]
+struct ProfileWitnessedSearchResponse {
+    results: Vec<WitnessedSearchItem>,
+    receipt: crate::shards::ProfileRoutingReceipt,
+    receipt_stored: bool,
+}
+
+#[cfg(feature = "server")]
 #[derive(Deserialize)]
 struct WitnessedSearchRequest {
     query: String,
@@ -255,6 +263,21 @@ struct WitnessedSearchRequest {
     source_types: Option<Vec<String>>,
     #[serde(default)]
     limit: Option<usize>,
+}
+
+#[cfg(feature = "server")]
+#[derive(Deserialize)]
+struct ProfileWitnessedSearchRequest {
+    actor_id: String,
+    query: String,
+    #[serde(default)]
+    namespaces: Option<Vec<String>>,
+    #[serde(default)]
+    source_types: Option<Vec<String>>,
+    #[serde(default)]
+    limit: Option<usize>,
+    #[serde(flatten)]
+    unexpected: serde_json::Map<String, Value>,
 }
 
 #[cfg(feature = "server")]
@@ -303,6 +326,19 @@ struct McpRegisterActorRequest {
 #[cfg(feature = "server")]
 #[derive(Deserialize)]
 struct McpSearchRequest {
+    query: String,
+    #[serde(default)]
+    namespaces: Option<Vec<String>>,
+    #[serde(default)]
+    source_types: Option<Vec<String>>,
+    #[serde(default)]
+    limit: Option<usize>,
+}
+
+#[cfg(feature = "server")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct McpProfileWitnessedSearchRequest {
     query: String,
     #[serde(default)]
     namespaces: Option<Vec<String>>,
@@ -451,6 +487,10 @@ fn build_router_with_route_selection(
             post(import_run_pack_observation_handler),
         )
         .route("/v1/search/witnessed", post(search_witnessed_handler))
+        .route(
+            "/v1/search/profile/witnessed",
+            post(search_profile_witnessed_handler),
+        )
         .route("/v1/replication/fact-create/v1", post(fact_create_handler))
         .route("/v1/sync", post(legacy_sync_disabled_handler))
         .route("/v1/sync/facts", post(legacy_sync_disabled_handler))
@@ -710,9 +750,17 @@ fn map_store_error(error: &MnemesError) -> (StatusCode, &'static str, &'static s
         MnemesError::InvalidCredential => {
             (StatusCode::UNAUTHORIZED, "invalid credentials", "denied")
         }
-        MnemesError::DeviceNotActive(_) | MnemesError::AuthorizationDenied(_) => {
+        MnemesError::DeviceNotActive(_)
+        | MnemesError::AuthorizationDenied(_)
+        | MnemesError::MemoryGrantDenied(_)
+        | MnemesError::ActorProfileBindingDenied(_) => {
             (StatusCode::FORBIDDEN, "access denied", "denied")
         }
+        MnemesError::AuthorizationSnapshotInvalid(_) => (
+            StatusCode::CONFLICT,
+            "authorization snapshot invalid",
+            "error",
+        ),
         MnemesError::DeviceNotFound(_) | MnemesError::ActorNotFound(_) => {
             (StatusCode::NOT_FOUND, "not found", "error")
         }
@@ -1819,6 +1867,12 @@ fn tools_for_actor(actor: Option<&Actor>) -> Vec<McpTool> {
             }),
         },
         McpTool {
+            name: "sm_search_profile_witnessed".to_string(),
+            description: "Search stores admitted by the authenticated actor's bound profile"
+                .to_string(),
+            input_schema: json!({"type":"object","properties":{"query":{"type":"string"},"namespaces":{"type":"array","items":{"type":"string"}},"source_types":{"type":"array","items":{"type":"string"}},"limit":{"type":"integer","minimum":1}},"required":["query"],"additionalProperties":false}),
+        },
+        McpTool {
             name: "sm_stats".to_string(),
             description: "Read registry and semantic memory statistics".to_string(),
             input_schema: json!({"type":"object","additionalProperties": false}),
@@ -1944,6 +1998,7 @@ fn read_tool(name: &str) -> bool {
             | "sm_get_actor"
             | "sm_get_operation"
             | "sm_search_witnessed"
+            | "sm_search_profile_witnessed"
             | "sm_stats"
             | "sm_health"
             | "sm_heartbeat"
@@ -2198,6 +2253,59 @@ async fn run_witnessed_search(
 }
 
 #[cfg(feature = "server")]
+async fn run_profile_witnessed_search(
+    state: &ServerState,
+    actor_id: &ActorId,
+    request: McpSearchRequest,
+) -> Result<ProfileWitnessedSearchResponse, MnemesError> {
+    let source_types = request
+        .source_types
+        .as_ref()
+        .map(|values| parse_operation_source_types(values))
+        .transpose()?;
+    let routed = state
+        .store
+        .routed_search_for_profile(
+            actor_id,
+            crate::shards::RoutingSearchRequest {
+                query: request.query,
+                top_k: request.limit.unwrap_or(10),
+                namespaces: request.namespaces,
+                source_types,
+                shard_budget: None,
+                exhaustive: false,
+            },
+            Utc::now().timestamp().max(0) as u64,
+        )
+        .await?;
+    let receipt = state
+        .store
+        .get_profile_routing_receipt(&routed.routing_receipt.receipt_id)
+        .await?
+        .ok_or_else(|| {
+            MnemesError::AuthorizationSnapshotInvalid(
+                "profile routing receipt was not persisted".to_string(),
+            )
+        })?;
+    let results = routed
+        .results
+        .into_iter()
+        .map(|value| {
+            result_from_operation_source(
+                value.result.source,
+                value.result.content,
+                value.result.score,
+            )
+        })
+        .collect();
+    Ok(ProfileWitnessedSearchResponse {
+        results,
+        receipt,
+        receipt_stored: true,
+    })
+}
+
+#[cfg(feature = "server")]
 async fn search_witnessed_handler(
     headers: HeaderMap,
     State(state): State<ServerState>,
@@ -2215,6 +2323,49 @@ async fn search_witnessed_handler(
         limit: payload.limit,
     };
     match run_witnessed_search(&state, request).await {
+        Ok(response) => (StatusCode::OK, Json(response)).into_response(),
+        Err(error) => error_response(&error),
+    }
+}
+
+#[cfg(feature = "server")]
+async fn search_profile_witnessed_handler(
+    headers: HeaderMap,
+    State(state): State<ServerState>,
+    Json(payload): Json<ProfileWitnessedSearchRequest>,
+) -> Response {
+    if !payload.unexpected.is_empty() {
+        return (
+            StatusCode::BAD_REQUEST,
+            Json(ErrorResponse {
+                error: "invalid request",
+            }),
+        )
+            .into_response();
+    }
+    let actor_id = match parse_actor_id(&payload.actor_id) {
+        Ok(actor_id) => actor_id,
+        Err(error) => return error_response(&error),
+    };
+    let context = match authorize(&state, &headers, Some(actor_id)).await {
+        Ok(context) => context,
+        Err(error) => return error_response(&error),
+    };
+    let actor = match context.actor {
+        Some(actor) => actor,
+        None => {
+            return error_response(&MnemesError::AuthorizationDenied(
+                "actor required".to_string(),
+            ))
+        }
+    };
+    let request = McpSearchRequest {
+        query: payload.query,
+        namespaces: payload.namespaces,
+        source_types: payload.source_types,
+        limit: payload.limit,
+    };
+    match run_profile_witnessed_search(&state, &actor.actor_id, request).await {
         Ok(response) => (StatusCode::OK, Json(response)).into_response(),
         Err(error) => error_response(&error),
     }
@@ -2468,6 +2619,33 @@ async fn mcp_handler(
                                     "failed to serialize result: {error}"
                                 ))
                             })?
+                    }
+                    "sm_search_profile_witnessed" => {
+                        let tool_request: McpProfileWitnessedSearchRequest =
+                            serde_json::from_value(args.clone()).map_err(|_| {
+                                MnemesError::InvalidAsOf(
+                                    "invalid sm_search_profile_witnessed args".to_string(),
+                                )
+                            })?;
+                        let actor = context.actor.as_ref().ok_or_else(|| {
+                            MnemesError::AuthorizationDenied("actor required".to_string())
+                        })?;
+                        serde_json::to_value(
+                            run_profile_witnessed_search(
+                                &state,
+                                &actor.actor_id,
+                                McpSearchRequest {
+                                    query: tool_request.query,
+                                    namespaces: tool_request.namespaces,
+                                    source_types: tool_request.source_types,
+                                    limit: tool_request.limit,
+                                },
+                            )
+                            .await?,
+                        )
+                        .map_err(|error| {
+                            MnemesError::InvalidAsOf(format!("failed to serialize result: {error}"))
+                        })?
                     }
                     "sm_stats" => {
                         let pooled = PoolStats {
