@@ -1514,9 +1514,9 @@ async fn profile_bound_rest_and_mcp_search_derive_subject_and_read_back_receipts
     let rest_result = rest["results"]
         .as_array()
         .and_then(|results| results.first())
-        .expect(&format!(
-            "profile witnessed REST search returns one result; response={rest}"
-        ));
+        .unwrap_or_else(|| {
+            panic!("profile witnessed REST search returns one result; response={rest}")
+        });
     assert_eq!(rest_result["store_id"], "http-store");
     assert_eq!(rest_result["profile_id"], profile_id);
     assert_eq!(rest_result["owner_device_id"], device.device_id);
