@@ -644,9 +644,9 @@ impl MnemesStore {
             let versions = statement
                 .query_map([], |row| row.get::<_, i64>(0))?
                 .collect::<Result<Vec<_>, _>>()?;
-            if !matches!(versions.as_slice(), [1] | [1, 2] | [1, 2, 3]) {
+            if !matches!(versions.as_slice(), [1] | [2] | [3] | [1, 2] | [1, 2, 3]) {
                 return Err(MnemesError::InvalidShardCatalog(format!(
-                    "unsupported pooled schema generations {versions:?}; expected [1, 2, 3]"
+                    "unsupported pooled schema generations {versions:?}; expected a supported generation marker"
                 )));
             }
         }
@@ -1004,12 +1004,11 @@ impl MnemesStore {
             }
         }
 
-        for version in 2..=POOLED_SCHEMA_GENERATION {
-            conn.execute(
-                "INSERT OR IGNORE INTO _pooled_schema_version(version, applied_at) VALUES (?1, datetime('now'))",
-                [version],
-            )?;
-        }
+        conn.execute("DELETE FROM _pooled_schema_version", [])?;
+        conn.execute(
+            "INSERT INTO _pooled_schema_version(version, applied_at) VALUES (?1, datetime('now'))",
+            [POOLED_SCHEMA_GENERATION],
+        )?;
         let schema_generation = conn.query_row(
             "SELECT MAX(version) FROM _pooled_schema_version",
             [],
@@ -2068,9 +2067,6 @@ impl MnemesStore {
             });
         }
         Ok(AuthorizationSnapshot::new(
-            binding.actor_id.clone(),
-            binding.owner_device_id.clone(),
-            binding.profile_id.clone(),
             &binding,
             effect,
             requested_namespaces,

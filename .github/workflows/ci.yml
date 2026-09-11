@@ -11,7 +11,7 @@ env:
   # The revision of RecursiveIntell/Libraries that mnemes builds against.
   # Bump deliberately: it is the semantic-memory source of truth for this
   # crate until a published release carries the journal supersede API.
-  LIBRARIES_REF: 3126252feb039e1577931437594115409374f360
+  LIBRARIES_REF: c85f0c241153eef212535d204b4fb4d380999349
 
 jobs:
   test:

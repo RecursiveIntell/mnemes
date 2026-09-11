@@ -504,9 +504,6 @@ pub struct AuthorizationSnapshot {
 
 impl AuthorizationSnapshot {
     pub fn new(
-        actor_id: ActorId,
-        actor_device_id: DeviceId,
-        subject_profile_id: MemoryProfileId,
         binding: &ActorProfileBinding,
         effect: MemoryAccessEffect,
         mut namespaces: Vec<String>,
@@ -524,9 +521,9 @@ impl AuthorizationSnapshot {
         }
         let mut snapshot = Self {
             authorization_snapshot_id: Uuid::new_v4().to_string(),
-            actor_id,
-            actor_device_id,
-            subject_profile_id,
+            actor_id: binding.actor_id.clone(),
+            actor_device_id: binding.owner_device_id.clone(),
+            subject_profile_id: binding.profile_id.clone(),
             binding_id: binding.binding_id.clone(),
             binding_digest: binding.binding_digest.clone(),
             effect,
