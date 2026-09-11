@@ -707,9 +707,9 @@ Revisit this plan when any of the following changes:
 Until then, the strongest supportable state is:
 
 ```text
-Mnemes profile/store/grant control plane: implemented on an isolated local candidate; exact publication-head validation remains required.
-Local actor-bound, grant-filtered profile routing: implemented on the isolated candidate with negative authorization, revocation, partial-store, and receipt read-back tests.
-HTTP/MCP profile-bound route: not implemented or active.
+Mnemes profile/store/grant control plane: locally implemented; exact publication-head validation remains required.
+Local actor-bound, grant-filtered profile routing: locally implemented with negative authorization, revocation, partial-store, and receipt read-back tests.
+HTTP/MCP profile-bound route: implemented and locally tested on the candidate; it is not deployed or active.
 Remote federation: not admitted.
 Production readiness: not claimed.
 ```
