@@ -60,19 +60,15 @@ The current Mnemes documentation establishes these source-owner boundaries:
 - Search receipts prove retrieval execution, not truth or permission to act.
 - Replication requires typed canonical mutation payloads; a digest-only journal cannot be converted into invented replay data.
 
-### 2.3 Current gap
+### 2.3 Remaining gaps
 
-The current implementation has a grant control plane but no runtime consumer. Specifically:
+The local admission slice resolves a profile from an authenticated actor binding, filters stores through the grant snapshot before opening them, and returns a persisted profile-routing receipt. The remaining gaps are:
 
-1. An authenticated actor has no canonical memory-profile subject binding.
-2. A search request can identify a device but cannot establish which profile is acting.
-3. A device shard is not canonically mapped to a profile-owned store.
-4. `routed_search` ranks device shards before any profile/store grant filtering.
-5. Search receipts do not bind an authorization snapshot, profile subject, store grant IDs/digest, or profile-owned store identity.
-6. The current HTTP/MCP path has no profile/store/grant lifecycle API.
-7. Remote trust-domain federation, peer key lifecycle, and sender-constrained transport identity are not implemented.
+1. Legacy `/v1/search/witnessed` and `sm_search_witnessed` remain compatibility paths and are not profile-governed.
+2. No HTTP/MCP profile/store/grant lifecycle API is exposed.
+3. Remote trust-domain federation, peer key lifecycle, sender-constrained transport identity, deployment, and activation are not implemented.
 
-These are observed source facts. They are not a claim that the current Mnemes server is already profile-federated.
+These are observed source facts. They are not a claim that the current Mnemes server is profile-federated or deployed.
 
 ## 3. Research basis and decisions
 
@@ -753,4 +749,4 @@ The plan is complete when:
 - the Hermes repository/PR exclusion is explicit.
 
 **Current plan state:** complete.
-**Implementation state:** not started from this plan.
+**Implementation state:** local profile-bound routing and REST/MCP admission are implemented; deployment and remote federation are not.
