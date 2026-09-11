@@ -247,8 +247,18 @@ struct WitnessedSearchResponse {
 
 #[cfg(feature = "server")]
 #[derive(Serialize)]
+struct ProfileWitnessedSearchItem {
+    #[serde(flatten)]
+    item: WitnessedSearchItem,
+    store_id: String,
+    profile_id: String,
+    owner_device_id: String,
+}
+
+#[cfg(feature = "server")]
+#[derive(Serialize)]
 struct ProfileWitnessedSearchResponse {
-    results: Vec<WitnessedSearchItem>,
+    results: Vec<ProfileWitnessedSearchItem>,
     receipt: crate::shards::ProfileRoutingReceipt,
     receipt_stored: bool,
 }
@@ -2151,6 +2161,24 @@ fn result_from_operation_source(
 }
 
 #[cfg(feature = "server")]
+fn result_from_profile_routed_search_result(
+    value: crate::shards::ProfileRoutedSearchResult,
+) -> ProfileWitnessedSearchItem {
+    let mut item = result_from_operation_source(
+        value.result.source,
+        value.result.content,
+        value.result.score,
+    );
+    item.namespace = value.namespace;
+    ProfileWitnessedSearchItem {
+        item,
+        store_id: value.store_id,
+        profile_id: value.profile_id.to_string(),
+        owner_device_id: value.owner_device_id.to_string(),
+    }
+}
+
+#[cfg(feature = "server")]
 async fn run_witnessed_search(
     state: &ServerState,
     request: McpSearchRequest,
@@ -2290,13 +2318,7 @@ async fn run_profile_witnessed_search(
     let results = routed
         .results
         .into_iter()
-        .map(|value| {
-            result_from_operation_source(
-                value.result.source,
-                value.result.content,
-                value.result.score,
-            )
-        })
+        .map(result_from_profile_routed_search_result)
         .collect();
     Ok(ProfileWitnessedSearchResponse {
         results,

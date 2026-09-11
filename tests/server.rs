@@ -1383,6 +1383,9 @@ async fn mcp_and_http_witnessed_search_has_durable_receipt() {
     let http_body: Value = http.json().await.unwrap();
     assert!(http_body["receipt"].is_object());
     assert_eq!(http_body["receipt_stored"].as_bool(), Some(true));
+    assert!(http_body["results"][0]["store_id"].is_null());
+    assert!(http_body["results"][0]["profile_id"].is_null());
+    assert!(http_body["results"][0]["owner_device_id"].is_null());
     assert!(http_body["receipt"]["receipt_id"].is_string());
     assert_eq!(
         mcp_body["result"]["results"][0]["item_id"].as_str(),
@@ -1454,7 +1457,7 @@ async fn prepare_bound_profile_search_fixture(
     .unwrap();
     physical
         .add_fact(
-            "private",
+            "synthetic-fact-namespace",
             "The profile witness saw the blue fox.",
             None,
             None,
@@ -1489,7 +1492,8 @@ async fn prepare_bound_profile_search_fixture(
 #[tokio::test]
 async fn profile_bound_rest_and_mcp_search_derive_subject_and_read_back_receipts() {
     let (temp, store) = open_store().await;
-    let fixture = prepare_bound_profile_search_fixture(&store, temp.path()).await;
+    let fixture =
+        prepare_bound_profile_search_fixture(&store, &temp.path().join("pooled-store")).await;
     let server = spawn_server_with_store(temp, store).await;
     let client = Client::new();
     let device = fixture.device;
@@ -1507,6 +1511,21 @@ async fn profile_bound_rest_and_mcp_search_derive_subject_and_read_back_receipts
     let rest: Value = rest.json().await.unwrap();
     assert_eq!(rest["receipt"]["subject_profile_id"], profile_id);
     assert_eq!(rest["receipt_stored"], true);
+    let rest_result = rest["results"]
+        .as_array()
+        .and_then(|results| results.first())
+        .expect(&format!(
+            "profile witnessed REST search returns one result; response={rest}"
+        ));
+    assert_eq!(rest_result["store_id"], "http-store");
+    assert_eq!(rest_result["profile_id"], profile_id);
+    assert_eq!(rest_result["owner_device_id"], device.device_id);
+    assert_eq!(rest_result["namespace"], "private");
+    assert!(rest["receipt"]["selected_stores"]
+        .as_array()
+        .expect("profile routing receipt has selected stores")
+        .iter()
+        .any(|store_id| store_id == &rest_result["store_id"]));
 
     let mcp = client
         .post(format!("{}/v1/mcp", server.base_url))
@@ -1524,6 +1543,28 @@ async fn profile_bound_rest_and_mcp_search_derive_subject_and_read_back_receipts
     assert_eq!(mcp["result"]["receipt"]["subject_profile_id"], profile_id);
     assert_eq!(mcp["result"]["receipt_stored"], true);
     assert_eq!(rest["results"], mcp["result"]["results"]);
+    for (rest_result, mcp_result) in rest["results"]
+        .as_array()
+        .expect("profile witnessed REST results are an array")
+        .iter()
+        .zip(
+            mcp["result"]["results"]
+                .as_array()
+                .expect("profile witnessed MCP results are an array"),
+        )
+    {
+        for field in ["store_id", "profile_id", "owner_device_id", "namespace"] {
+            assert_eq!(
+                rest_result[field], mcp_result[field],
+                "REST/MCP {field} lineage parity"
+            );
+        }
+        assert!(mcp["result"]["receipt"]["selected_stores"]
+            .as_array()
+            .expect("profile routing MCP receipt has selected stores")
+            .iter()
+            .any(|store_id| store_id == &mcp_result["store_id"]));
+    }
     assert_eq!(
         rest["receipt"]["subject_profile_id"],
         mcp["result"]["receipt"]["subject_profile_id"]
