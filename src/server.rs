@@ -2675,7 +2675,7 @@ async fn mcp_handler(
                             actors: state.store.count_actors().await?,
                             operations: state.store.count_operations().await?,
                         };
-                        let semantic = state.store.memory().stats().await?;
+                        let semantic = state.store.shard_stats().await?;
                         serde_json::to_value(McpStatsResponse {
                             pooled,
                             semantic: serde_json::to_value(semantic).map_err(|error| {

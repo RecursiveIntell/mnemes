@@ -490,6 +490,14 @@ fn legacy_global_memory_db_in_active_tree_is_rejected() {
     assert!(error.to_string().contains("legacy global"));
 }
 
+#[tokio::test]
+async fn shard_stats_does_not_recreate_legacy_global_memory_db() {
+    let (temp, store) = open_store(2);
+    let stats = store.shard_stats().await.unwrap();
+    assert_eq!(stats.total_facts, 0);
+    assert!(!temp.path().join("pooled-store/memory/memory.db").exists());
+}
+
 #[test]
 fn unsupported_pooled_schema_generation_is_rejected() {
     let temp = tempfile::TempDir::new().unwrap();
