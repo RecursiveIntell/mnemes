@@ -2697,6 +2697,12 @@ impl MnemesStore {
         &self.memory_config
     }
 
+    /// Return whether the legacy accessor has already been initialized.
+    /// This is observational and never opens or creates the legacy store.
+    pub fn has_legacy_memory(&self) -> bool {
+        self.legacy_memory.get().is_some()
+    }
+
     /// Legacy synchronous accessor for handlers that predate the shard architecture.
     /// Lazily opens legacy memory/memory.db on first access.
     pub fn memory(&self) -> &semantic_memory::MemoryStore {
@@ -3346,6 +3352,18 @@ impl MnemesStore {
         let conn = self.pool_conn.lock().await;
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM device_shards WHERE state = 'active' AND fact_count > 0",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Return whether the canonical catalog contains any active semantic shard.
+    /// This does not open or create a shard database.
+    pub async fn has_registered_shards(&self) -> Result<bool, MnemesError> {
+        let conn = self.pool_conn.lock().await;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM device_shards WHERE state = 'active'",
             [],
             |row| row.get(0),
         )?;
