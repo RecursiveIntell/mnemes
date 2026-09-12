@@ -2697,6 +2697,12 @@ impl MnemesStore {
         &self.memory_config
     }
 
+    /// Return whether the legacy accessor has already been initialized.
+    /// This is observational and never opens or creates the legacy store.
+    pub fn has_legacy_memory(&self) -> bool {
+        self.legacy_memory.get().is_some()
+    }
+
     /// Legacy synchronous accessor for handlers that predate the shard architecture.
     /// Lazily opens legacy memory/memory.db on first access.
     pub fn memory(&self) -> &semantic_memory::MemoryStore {
@@ -3263,6 +3269,37 @@ impl MnemesStore {
         Ok(shards)
     }
 
+    /// Return aggregate semantic counts from the canonical shard catalog.
+    ///
+    /// This is intentionally catalog-only: operator/read paths must not open
+    /// or recreate the rejected legacy `memory/memory.db` store merely to
+    /// report statistics.
+    pub async fn shard_stats(&self) -> Result<semantic_memory::MemoryStats, MnemesError> {
+        let shards = self.list_shards().await?;
+        let mut stats = semantic_memory::MemoryStats {
+            total_facts: 0,
+            total_documents: 0,
+            total_chunks: 0,
+            total_sessions: 0,
+            total_messages: 0,
+            database_size_bytes: 0,
+            embedding_model: Some(self.embedder.model_name().to_string()),
+            embedding_dimensions: Some(self.embedder.dimensions()),
+        };
+        for shard in shards {
+            stats.total_facts = stats.total_facts.saturating_add(shard.fact_count);
+            stats.total_documents = stats.total_documents.saturating_add(shard.document_count);
+            stats.total_chunks = stats.total_chunks.saturating_add(shard.chunk_count);
+            stats.total_messages = stats.total_messages.saturating_add(shard.message_count);
+            let path = self.device_shard_path(&shard.device_id).join("memory.db");
+            if let Ok(metadata) = std::fs::metadata(path) {
+                stats.database_size_bytes =
+                    stats.database_size_bytes.saturating_add(metadata.len());
+            }
+        }
+        Ok(stats)
+    }
+
     /// Refresh one derived summary from public semantic-memory owner statistics.
     pub async fn refresh_shard_summary(
         &self,
@@ -3315,6 +3352,18 @@ impl MnemesStore {
         let conn = self.pool_conn.lock().await;
         let count: i64 = conn.query_row(
             "SELECT COUNT(*) FROM device_shards WHERE state = 'active' AND fact_count > 0",
+            [],
+            |row| row.get(0),
+        )?;
+        Ok(count > 0)
+    }
+
+    /// Return whether the canonical catalog contains any active semantic shard.
+    /// This does not open or create a shard database.
+    pub async fn has_registered_shards(&self) -> Result<bool, MnemesError> {
+        let conn = self.pool_conn.lock().await;
+        let count: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM device_shards WHERE state = 'active'",
             [],
             |row| row.get(0),
         )?;

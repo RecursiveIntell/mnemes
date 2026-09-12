@@ -18,7 +18,7 @@ use chrono::Utc;
 #[cfg(feature = "server")]
 use semantic_memory::{
     ExactnessProfile, MemoryConfig, ReceiptMode, SearchContext, SearchSource, SearchSourceType,
-    VectorSearchReceiptV1, VerifyMode,
+    VectorSearchReceiptV1,
 };
 #[cfg(feature = "server")]
 use serde::{Deserialize, Serialize};
@@ -893,13 +893,8 @@ async fn integrity_handler(headers: HeaderMap, State(state): State<ServerState>)
         Err(error) => return error_response(&error),
     };
 
-    let report = match state
-        .store
-        .memory()
-        .verify_integrity(VerifyMode::Quick)
-        .await
-    {
-        Ok(report) => report,
+    let reports = match state.store.verify_all_shards().await {
+        Ok(reports) => reports,
         Err(error) => {
             let _ = log_audit(
                 &state,
@@ -913,7 +908,7 @@ async fn integrity_handler(headers: HeaderMap, State(state): State<ServerState>)
                 Some("verify failed"),
             )
             .await;
-            return error_response(&MnemesError::Memory(error));
+            return error_response(&error);
         }
     };
 
@@ -921,7 +916,7 @@ async fn integrity_handler(headers: HeaderMap, State(state): State<ServerState>)
         "service_id": state.server_id.clone(),
         "schema_version": SCHEMA_VERSION,
         "checked_at": Utc::now().to_rfc3339(),
-        "report": format!("{:?}", report),
+        "report": reports,
     });
 
     log_audit(
@@ -2183,20 +2178,17 @@ async fn run_witnessed_search(
     state: &ServerState,
     request: McpSearchRequest,
 ) -> Result<WitnessedSearchResponse, MnemesError> {
-    let namespaces = request
-        .namespaces
-        .as_ref()
-        .map(|value| value.iter().map(String::as_str).collect::<Vec<_>>());
     let source_types = request
         .source_types
         .as_ref()
         .map(|values| parse_operation_source_types(values))
         .transpose()?;
 
-    // Check if sharded mode is active
-    let has_shards = state.store.has_shards().await?;
+    // Check if the canonical shard catalog is active. This deliberately does
+    // not fall back to the rejected legacy memory/memory.db accessor.
+    let has_shards = state.store.has_registered_shards().await?;
 
-    if has_shards {
+    if has_shards && !state.store.has_legacy_memory() {
         // Routed path: delegate to MnemesStore::routed_search which handles
         // shard selection, parallel search, merge, conflict scanning, and
         // routing receipt persistence.
@@ -2237,46 +2229,60 @@ async fn run_witnessed_search(
         });
     }
 
-    // Legacy fallback: no shards registered (test/single-device mode)
-    let mut context = SearchContext::default_now();
-    context.receipt_mode = ReceiptMode::ReturnReceipt;
-    context.exactness_profile = ExactnessProfile::PreferExact;
-
-    let search_response = state
-        .store
-        .memory()
-        .search_with_context(
-            &request.query,
-            request.limit,
-            namespaces.as_deref(),
-            source_types.as_deref(),
-            context,
-        )
-        .await?;
-
-    let results = search_response
-        .results
-        .into_iter()
-        .map(|value| result_from_operation_source(value.source, value.content, value.score))
-        .collect::<Vec<_>>();
-    let receipt = search_response.receipt.clone();
-    let receipt_stored = if let Some(receipt) = &receipt {
-        state
+    // A legacy database may still be queried during migration, but only when
+    // it already exists. Never create the rejected legacy path as a side effect
+    // of an empty canonical tree.
+    let legacy_path = state.store.base_dir().join("memory").join("memory.db");
+    if legacy_path.exists() || state.store.has_legacy_memory() {
+        let mut context = SearchContext::default_now();
+        context.receipt_mode = ReceiptMode::ReturnReceipt;
+        context.exactness_profile = ExactnessProfile::PreferExact;
+        let search_response = state
             .store
             .memory()
-            .get_search_receipt(&receipt.receipt_id)
-            .await
-            .ok()
-            .flatten()
-            .is_some()
-    } else {
-        false
-    };
+            .search_with_context(
+                &request.query,
+                request.limit,
+                request
+                    .namespaces
+                    .as_ref()
+                    .map(|value| value.iter().map(String::as_str).collect::<Vec<_>>())
+                    .as_deref(),
+                source_types.as_deref(),
+                context,
+            )
+            .await?;
+        let results = search_response
+            .results
+            .into_iter()
+            .map(|value| result_from_operation_source(value.source, value.content, value.score))
+            .collect::<Vec<_>>();
+        let receipt = search_response.receipt.clone();
+        let receipt_stored = if let Some(receipt) = &receipt {
+            state
+                .store
+                .memory()
+                .get_search_receipt(&receipt.receipt_id)
+                .await
+                .ok()
+                .flatten()
+                .is_some()
+        } else {
+            false
+        };
+        return Ok(WitnessedSearchResponse {
+            results,
+            receipt,
+            receipt_stored,
+        });
+    }
 
+    // No canonical shards or pre-existing legacy database means there is no
+    // semantic search corpus yet.
     Ok(WitnessedSearchResponse {
-        results,
-        receipt,
-        receipt_stored,
+        results: Vec::new(),
+        receipt: None,
+        receipt_stored: false,
     })
 }
 
@@ -2675,7 +2681,7 @@ async fn mcp_handler(
                             actors: state.store.count_actors().await?,
                             operations: state.store.count_operations().await?,
                         };
-                        let semantic = state.store.memory().stats().await?;
+                        let semantic = state.store.shard_stats().await?;
                         serde_json::to_value(McpStatsResponse {
                             pooled,
                             semantic: serde_json::to_value(semantic).map_err(|error| {
@@ -2870,21 +2876,21 @@ async fn mcp_handler(
                             Err(error) => ("failed", error.to_string()),
                         };
 
-                        let (semantic_status, semantic_detail) = match state
-                            .store
-                            .memory()
-                            .verify_integrity(VerifyMode::Quick)
-                            .await
-                        {
-                            Ok(report) => {
-                                if report.ok {
-                                    ("ok", format!("{report:?}"))
-                                } else {
-                                    ("degraded", format!("issues: {:?}", report.issues))
+                        let (semantic_status, semantic_detail) =
+                            match state.store.verify_all_shards().await {
+                                Ok(reports)
+                                    if reports.iter().all(|report| report.status == "ok") =>
+                                {
+                                    ("ok", format!("{reports:?}"))
                                 }
-                            }
-                            Err(error) => ("failed", format!("error: {error}")),
-                        };
+                                Ok(reports)
+                                    if reports.iter().any(|report| report.status == "failed") =>
+                                {
+                                    ("failed", format!("{reports:?}"))
+                                }
+                                Ok(reports) => ("degraded", format!("{reports:?}")),
+                                Err(error) => ("failed", format!("error: {error}")),
+                            };
                         serde_json::to_value(VerifyIntegrityResponse {
                             pooled_sqlite: IntegrityCheckReport {
                                 status: pooled_status,

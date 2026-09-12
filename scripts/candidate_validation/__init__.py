@@ -1,0 +1,1 @@
+"""Disposable candidate validation helpers."""

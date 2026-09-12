@@ -1393,6 +1393,30 @@ async fn mcp_and_http_witnessed_search_has_durable_receipt() {
     );
 }
 
+#[tokio::test]
+async fn witnessed_search_without_corpus_does_not_create_legacy_global_db() {
+    let (temp, store) = open_store().await;
+    let base_dir = store.base_dir().to_path_buf();
+    let server = spawn_server_with_store(temp, store).await;
+    let client = Client::new();
+    let device = register_device(&server, &client).await;
+    let actor = register_actor(&server, &client, &device, "agent").await;
+
+    let result = mcp_call(
+        &client,
+        &server,
+        &device.credential,
+        &actor.actor_id,
+        "sm_search_witnessed",
+        json!({ "query": "empty" }),
+    )
+    .await;
+
+    assert_eq!(result["receipt_stored"], false);
+    assert_eq!(result["results"].as_array().map(Vec::len), Some(0));
+    assert!(!base_dir.join("memory").join("memory.db").exists());
+}
+
 struct ProfileSearchFixture {
     device: DeviceIdentity,
     actor: ActorIdentity,
