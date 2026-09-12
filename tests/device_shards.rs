@@ -498,6 +498,31 @@ async fn shard_stats_does_not_recreate_legacy_global_memory_db() {
     assert!(!temp.path().join("pooled-store/memory/memory.db").exists());
 }
 
+#[tokio::test]
+async fn read_paths_survive_reopen_without_recreating_legacy_global_memory_db() {
+    let (temp, store) = open_store(2);
+    let base = temp.path().join("pooled-store");
+
+    assert!(store.verify_all_shards().await.unwrap().is_empty());
+    assert!(!base.join("memory/memory.db").exists());
+    drop(store);
+
+    let reopened = MnemesStore::open_with_embedder_and_cache_capacity(
+        base.clone(),
+        semantic_memory::MemoryConfig {
+            base_dir: temp.path().join("ignored-template-path"),
+            ..Default::default()
+        },
+        Box::new(semantic_memory::MockEmbedder::new(768)),
+        2,
+    )
+    .unwrap();
+
+    assert!(reopened.shard_stats().await.unwrap().total_facts == 0);
+    assert!(reopened.verify_all_shards().await.unwrap().is_empty());
+    assert!(!base.join("memory/memory.db").exists());
+}
+
 #[test]
 fn unsupported_pooled_schema_generation_is_rejected() {
     let temp = tempfile::TempDir::new().unwrap();
