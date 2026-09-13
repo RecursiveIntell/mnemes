@@ -2829,6 +2829,8 @@ impl MnemesStore {
                 return Err(MnemesError::FactCreateRejected("semantic conflict".into()));
             }
         };
+        self.refresh_shard_counts(&DeviceId::parse(&batch.home_device_id)?)
+            .await?;
         let ack = FactCreateAckRecord {
             batch_id: batch.batch_id.clone(),
             request_digest,
@@ -3298,6 +3300,35 @@ impl MnemesStore {
             }
         }
         Ok(stats)
+    }
+
+    /// Refresh only catalog counters after a canonical shard mutation.
+    pub async fn refresh_shard_counts(
+        &self,
+        device_id: &DeviceId,
+    ) -> Result<(), MnemesError> {
+        let memory = self.device_memory(device_id).await?;
+        let stats = memory.stats().await?;
+        let conn = self.pool_conn.lock().await;
+        let affected = conn.execute(
+            "UPDATE device_shards
+             SET fact_count = ?1, document_count = ?2, chunk_count = ?3,
+                 message_count = ?4, generation = generation + 1,
+                 last_refreshed_at = ?5
+             WHERE device_id = ?6",
+            params![
+                stats.total_facts,
+                stats.total_documents,
+                stats.total_chunks,
+                stats.total_messages,
+                Utc::now().to_rfc3339(),
+                device_id.as_str(),
+            ],
+        )?;
+        if affected == 0 {
+            return Err(MnemesError::DeviceNotFound(device_id.to_string()));
+        }
+        Ok(())
     }
 
     /// Refresh one derived summary from public semantic-memory owner statistics.
@@ -4085,6 +4116,7 @@ impl MnemesStore {
             // Re-embedding is done entirely at the authority's configured provider.
             let shard = self.device_memory(device_id).await?;
             let id = shard.add_fact(namespace, content, source, metadata).await?;
+            self.refresh_shard_counts(device_id).await?;
             (id.clone(), FactSyncOutcome::Synced { server_fact_id: id })
         };
 
