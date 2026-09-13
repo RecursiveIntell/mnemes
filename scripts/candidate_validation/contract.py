@@ -5,6 +5,8 @@ semantics or authorize live deployment.
 """
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 from typing import Any, Mapping
 
@@ -24,7 +26,7 @@ _REQUIRED_MANIFEST = {
     "timeout_seconds",
     "allowed_write_roots",
 }
-_REQUIRED_RESULT = {"run_id", "outcome", "receipt_sha256", "evidence"}
+_REQUIRED_RESULT = {"run_id", "manifest_sha256", "outcome", "receipt_sha256", "evidence"}
 _TERMINAL_OUTCOMES = {"passed", "failed", "outcome_unknown", "cleanup_pending"}
 
 
@@ -32,6 +34,12 @@ def _require_string(value: Any, name: str) -> str:
     if not isinstance(value, str) or not value:
         raise ContractError(f"{name} must be a non-empty string")
     return value
+
+
+def manifest_sha256(manifest: Mapping[str, Any]) -> str:
+    """Digest the complete validated manifest with deterministic JSON."""
+    payload = json.dumps(dict(manifest), sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
@@ -49,18 +57,25 @@ def validate_manifest(manifest: Mapping[str, Any]) -> dict[str, Any]:
 
 
 def validate_result(result: Mapping[str, Any], manifest: Mapping[str, Any]) -> dict[str, Any]:
-    validate_manifest(manifest)
+    validated_manifest = validate_manifest(manifest)
     missing = sorted(_REQUIRED_RESULT - result.keys())
     if missing:
         raise ContractError(f"result missing fields: {', '.join(missing)}")
-    if result["run_id"] != manifest["run_id"]:
+    if result["run_id"] != validated_manifest["run_id"]:
         raise ContractError("result run_id does not match manifest")
+    if result["manifest_sha256"] != manifest_sha256(validated_manifest):
+        raise ContractError("result manifest_sha256 does not match manifest")
     outcome = result["outcome"]
     if outcome not in _TERMINAL_OUTCOMES:
         raise ContractError(f"invalid terminal outcome: {outcome!r}")
     _require_string(result["receipt_sha256"], "receipt_sha256")
     evidence = result["evidence"]
-    if not isinstance(evidence, dict) or not evidence.get("required_files"):
+    if not isinstance(evidence, dict):
+        raise ContractError("evidence must be an object")
+    if outcome == "cleanup_pending":
+        if not evidence.get("quarantine_path"):
+            raise ContractError("cleanup_pending requires a quarantine path")
+    elif not evidence.get("required_files"):
         raise ContractError("evidence.required_files must be non-empty")
     if outcome == "passed":
         if evidence.get("teardown_verified") is not True:
@@ -69,8 +84,6 @@ def validate_result(result: Mapping[str, Any], manifest: Mapping[str, Any]) -> d
             raise ContractError("passed result requires input integrity")
         if evidence.get("remote_exit_code") != 0:
             raise ContractError("passed result requires remote exit code 0")
-    if outcome == "cleanup_pending" and not evidence.get("quarantine_path"):
-        raise ContractError("cleanup_pending requires a quarantine path")
     return dict(result)
 
 

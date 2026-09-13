@@ -4,18 +4,59 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import selectors
+import signal
 import subprocess
+import tempfile
+import time
 from pathlib import Path
 from typing import Sequence
 
 try:
-    from .contract import ContractError, validate_manifest, validate_result
-except ImportError:  # Direct fixture loading uses a file-backed module name.
-    from contract import ContractError, validate_manifest, validate_result
+    from .contract import ContractError, manifest_sha256, validate_manifest, validate_result
+except ImportError:
+    from contract import ContractError, manifest_sha256, validate_manifest, validate_result
 
 
 def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _group_exists(pid: int) -> bool:
+    try:
+        os.killpg(pid, 0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+
+
+def _terminate_group(child: subprocess.Popen) -> bool:
+    if _group_exists(child.pid):
+        try:
+            os.killpg(child.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+    try:
+        child.wait(timeout=5)
+    except subprocess.TimeoutExpired:
+        return False
+    return not _group_exists(child.pid)
+
+
+def _atomic_write(path: Path, payload: bytes) -> None:
+    path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+    fd, raw = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(raw)
+    try:
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 class CandidateController:
@@ -53,18 +94,39 @@ class CandidateController:
         artifacts_complete = False
 
         try:
-            for name in self._ARTIFACTS:
+            result_path = evidence_dir / "result.json"
+            result = None
+            if result_path.exists():
+                try:
+                    result = json.loads(result_path.read_text(encoding="utf-8"))
+                except (OSError, json.JSONDecodeError):
+                    result = None
+            if result is None:
+                _atomic_write(result_path, transport.fetch(run_id, "result.json"))
+                result = json.loads(result_path.read_text(encoding="utf-8"))
+
+            for name in self._ARTIFACTS[1:]:
                 target = evidence_dir / name
-                if not target.exists():
-                    target.write_bytes(transport.fetch(run_id, name))
+                expected = result.get("artifacts", {}).get(name)
+                verified = False
+                if target.exists() and expected:
+                    try:
+                        verified = _sha256_bytes(target.read_bytes()) == expected
+                    except OSError:
+                        verified = False
+                if not verified:
+                    _atomic_write(target, transport.fetch(run_id, name))
             artifacts_complete = True
-            result = json.loads((evidence_dir / "result.json").read_text(encoding="utf-8"))
+            result = json.loads(result_path.read_text(encoding="utf-8"))
             if result.get("manifest_sha256") != manifest_sha256:
                 state["state"] = "rejected"
                 state["reason"] = "manifest mismatch"
             elif result.get("exit_code") != remote_exit:
                 state["state"] = "rejected"
                 state["reason"] = "remote exit mismatch"
+            elif remote_exit == 0 or result.get("exit_code") == 0:
+                state["state"] = "rejected"
+                state["reason"] = "expected refusal exited successfully"
             elif result.get("outcome") != "expected_refusal":
                 state["state"] = "rejected"
                 state["reason"] = "unexpected remote outcome"
@@ -89,7 +151,7 @@ class CandidateController:
                     else:
                         state["accepted"] = True
                         state["state"] = "complete"
-                        state["result_sha256"] = _sha256_bytes((evidence_dir / "result.json").read_bytes())
+                        state["result_sha256"] = _sha256_bytes(result_path.read_bytes())
                         if had_prior_controller:
                             attempts = evidence_dir / "attempts"
                             attempts.mkdir(mode=0o700, exist_ok=True)
@@ -103,7 +165,7 @@ class CandidateController:
             state["state"] = "evidence_pending"
             state["reason"] = type(error).__name__
 
-        controller_path.write_text(json.dumps(state, sort_keys=True) + "\n", encoding="utf-8")
+        _atomic_write(controller_path, (json.dumps(state, sort_keys=True) + "\n").encode())
         return state
 
 
@@ -126,38 +188,97 @@ def run_local(
     result_path: Path,
     *,
     timeout_seconds: float | None = None,
+    max_output_bytes: int = 1024 * 1024,
 ) -> dict:
     validate_manifest(manifest)
+    if result_path.exists():
+        raise ContractError("result path already exists; refusing stale receipt reuse")
+    if type(max_output_bytes) is not int or not 0 < max_output_bytes <= 16 * 1024 * 1024:
+        raise ContractError("max_output_bytes must be a positive bounded integer")
     timeout = timeout_seconds or float(manifest["timeout_seconds"])
+    child = None
+    selector = selectors.DefaultSelector()
+    captured = 0
+    teardown_verified = False
     try:
-        completed = subprocess.run(
+        child = subprocess.Popen(
             list(command),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.DEVNULL,
             env={"PATH": os.environ.get("PATH", "")},
+            start_new_session=True,
+            close_fds=True,
         )
-    except subprocess.TimeoutExpired as error:
+        for pipe in (child.stdout, child.stderr):
+            assert pipe is not None
+            os.set_blocking(pipe.fileno(), False)
+            selector.register(pipe, selectors.EVENT_READ)
+        deadline = time.monotonic() + timeout
+        while selector.get_map():
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                teardown_verified = _terminate_group(child)
+                result = {
+                    "run_id": manifest["run_id"],
+                    "manifest_sha256": manifest_sha256(manifest),
+                    "outcome": "cleanup_pending",
+                    "receipt_sha256": "timeout-no-receipt",
+                    "evidence": {
+                        "required_files": ["result.json"],
+                        "teardown_verified": teardown_verified,
+                        "input_integrity": True,
+                        "remote_exit_code": None,
+                        "quarantine_path": str(result_path.parent / "quarantine"),
+                        "timeout": timeout,
+                    },
+                }
+                _atomic_write(result_path, (json.dumps(result, sort_keys=True) + "\n").encode())
+                validate_result(result, manifest)
+                return result
+            for key, _ in selector.select(min(remaining, 0.05)):
+                chunk = os.read(key.fd, 65536)
+                if not chunk:
+                    selector.unregister(key.fileobj)
+                    continue
+                captured += len(chunk)
+                if captured > max_output_bytes:
+                    teardown_verified = _terminate_group(child)
+                    raise ContractError(
+                        f"process exceeded bounded output limit; teardown_verified={teardown_verified}"
+                    )
+        child.wait(timeout=max(0.01, deadline - time.monotonic()))
+        teardown_verified = _terminate_group(child)
+    except subprocess.TimeoutExpired:
+        teardown_verified = _terminate_group(child) if child is not None else False
         result = {
             "run_id": manifest["run_id"],
+            "manifest_sha256": manifest_sha256(manifest),
             "outcome": "cleanup_pending",
             "receipt_sha256": "timeout-no-receipt",
             "evidence": {
-                "required_files": [],
-                "teardown_verified": False,
+                "required_files": ["result.json"],
+                "teardown_verified": teardown_verified,
                 "input_integrity": True,
                 "remote_exit_code": None,
                 "quarantine_path": str(result_path.parent / "quarantine"),
-                "timeout": str(error.timeout),
+                "timeout": timeout,
             },
         }
-        result_path.write_text(json.dumps(result, sort_keys=True) + "\n")
+        _atomic_write(result_path, (json.dumps(result, sort_keys=True) + "\n").encode())
+        validate_result(result, manifest)
         return result
+    finally:
+        selector.close()
+        if child is not None:
+            for pipe in (child.stdout, child.stderr):
+                if pipe is not None:
+                    pipe.close()
 
     if not result_path.exists():
         raise ContractError("process exited without a result receipt")
-    result = json.loads(result_path.read_text())
-    result.setdefault("evidence", {})["remote_exit_code"] = completed.returncode
+    result = json.loads(result_path.read_text(encoding="utf-8"))
+    result.setdefault("evidence", {})["remote_exit_code"] = child.returncode
+    result["evidence"]["teardown_verified"] = teardown_verified
     validate_result(result, manifest)
     return result

@@ -498,6 +498,38 @@ async fn shard_stats_does_not_recreate_legacy_global_memory_db() {
     assert!(!temp.path().join("pooled-store/memory/memory.db").exists());
 }
 
+ 
+#[tokio::test]
+async fn synced_fact_refreshes_catalog_semantic_counts() {
+    let (_temp, store) = open_store(2);
+    let device = register(&store, "counted").await;
+    store
+        .sync_fact_to_shard(&device, "source-1", "notes", "count me", None, None)
+        .await
+        .unwrap();
+    let stats = store.shard_stats().await.unwrap();
+    assert_eq!(stats.total_facts, 1);
+}
+
+#[tokio::test]
+async fn verify_missing_cataloged_shard_reports_loss_without_recreating_database() {
+    let (temp, store) = open_store(2);
+    let device = register(&store, "missing-shard").await;
+    let shard_path = temp
+        .path()
+        .join("pooled-store")
+        .join("memory")
+        .join("shards")
+        .join(device.as_str())
+        .join("memory.db");
+    std::fs::create_dir_all(shard_path.parent().unwrap()).unwrap();
+    let statuses = store.verify_all_shards().await.unwrap();
+    let status = statuses.iter().find(|value| value.device_id == device).unwrap();
+    assert_eq!(status.status, "failed");
+    assert!(status.detail.contains("unavailable"));
+    assert!(!shard_path.exists());
+}
+
 #[tokio::test]
 async fn read_paths_survive_reopen_without_recreating_legacy_global_memory_db() {
     let (temp, store) = open_store(2);
