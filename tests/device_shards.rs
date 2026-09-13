@@ -501,17 +501,14 @@ async fn shard_stats_does_not_recreate_legacy_global_memory_db() {
 #[tokio::test]
 async fn verify_missing_cataloged_shard_reports_loss_without_recreating_database() {
     let (temp, store) = open_store(2);
-    let device = DeviceId::new();
-    store
-        .register_device(Device::new(
-            device.clone(),
-            "missing-shard".to_string(),
-            "test".to_string(),
-            "host".to_string(),
-        ))
-        .await
-        .unwrap();
-    let shard_path = temp.path().join("pooled-store").join("devices").join(device.as_str()).join("memory.db");
+    let device = register(&store, "missing-shard").await;
+    let shard_path = temp
+        .path()
+        .join("pooled-store")
+        .join("memory")
+        .join("shards")
+        .join(device.as_str())
+        .join("memory.db");
     std::fs::create_dir_all(shard_path.parent().unwrap()).unwrap();
     let statuses = store.verify_all_shards().await.unwrap();
     let status = statuses.iter().find(|value| value.device_id == device).unwrap();
