@@ -524,7 +524,10 @@ async fn verify_missing_cataloged_shard_reports_loss_without_recreating_database
         .join("memory.db");
     std::fs::create_dir_all(shard_path.parent().unwrap()).unwrap();
     let statuses = store.verify_all_shards().await.unwrap();
-    let status = statuses.iter().find(|value| value.device_id == device).unwrap();
+    let status = statuses
+        .iter()
+        .find(|value| value.device_id == device)
+        .unwrap();
     assert_eq!(status.status, "failed");
     assert!(status.detail.contains("unavailable"));
     assert!(!shard_path.exists());
