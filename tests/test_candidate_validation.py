@@ -119,7 +119,7 @@ class CandidateValidationTests(unittest.TestCase):
             command_code = (
                 "import json, subprocess, sys\n"
                 + f"subprocess.Popen([sys.executable, '-c', {descendant_code!r}], start_new_session=True)\n"
-                + f"open({str(result_path)!r}, 'w', encoding='utf-8').write({json.dumps(json.dumps(payload))!r})"
+                + f"open({str(result_path)!r}, 'w', encoding='utf-8').write(json.dumps({payload!r}))"
             )
             observed = run_local(
                 MANIFEST,
