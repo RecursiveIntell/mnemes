@@ -1,12 +1,14 @@
 """Bounded local process probe used by disposable candidate validation."""
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
 import selectors
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -18,11 +20,59 @@ except ImportError:
     from contract import ContractError, manifest_sha256, validate_manifest, validate_result
 
 
+_PR_SET_CHILD_SUBREAPER = 36
+_subreaper_enabled = False
+
+
 def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
 
 
+def _enable_child_subreaper() -> None:
+    """Keep orphaned candidate descendants under this controller on Linux."""
+    global _subreaper_enabled
+    if _subreaper_enabled or sys.platform != "linux":
+        return
+    libc = ctypes.CDLL(None, use_errno=True)
+    if libc.prctl(_PR_SET_CHILD_SUBREAPER, 1, 0, 0, 0) != 0:
+        error = ctypes.get_errno()
+        raise OSError(error, os.strerror(error))
+    _subreaper_enabled = True
+
+
+def _proc_parent_map() -> dict[int, int]:
+    if sys.platform != "linux":
+        return {}
+    parents = {}
+    for raw_pid in os.listdir("/proc"):
+        if not raw_pid.isdigit():
+            continue
+        try:
+            pid = int(raw_pid)
+            line = Path("/proc", raw_pid, "stat").read_text(encoding="ascii")
+            after_command = line.rsplit(")", 1)[1].split()
+            parents[pid] = int(after_command[1])
+        except (OSError, ValueError, IndexError):
+            continue
+    return parents
+
+
+def _descendant_pids(root_pid: int) -> set[int]:
+    parents = _proc_parent_map()
+    descendants = set()
+    frontier = [root_pid]
+    while frontier:
+        parent = frontier.pop()
+        for pid, candidate_parent in parents.items():
+            if candidate_parent == parent and pid not in descendants:
+                descendants.add(pid)
+                frontier.append(pid)
+    return descendants
+
+
 def _group_exists(pid: int) -> bool:
+    if not hasattr(os, "killpg"):
+        return False
     try:
         os.killpg(pid, 0)
         return True
@@ -32,17 +82,50 @@ def _group_exists(pid: int) -> bool:
         return True
 
 
-def _terminate_group(child: subprocess.Popen) -> bool:
-    if _group_exists(child.pid):
+def _kill_pids(pids: set[int]) -> None:
+    for pid in sorted(pids, reverse=True):
+        try:
+            os.kill(pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _reap_children() -> None:
+    while True:
+        try:
+            pid, _ = os.waitpid(-1, os.WNOHANG)
+        except (ChildProcessError, OSError):
+            return
+        if pid == 0:
+            return
+
+
+def _terminate_group(child: subprocess.Popen, baseline_pids: set[int]) -> bool:
+    """Terminate the group and descendants adopted by this subreaper."""
+    targets = _descendant_pids(child.pid)
+    if _subreaper_enabled:
+        targets.update(_descendant_pids(os.getpid()) - baseline_pids - {child.pid})
+    if hasattr(os, "killpg") and _group_exists(child.pid):
         try:
             os.killpg(child.pid, signal.SIGKILL)
         except ProcessLookupError:
             pass
+    _kill_pids(targets)
     try:
         child.wait(timeout=5)
     except subprocess.TimeoutExpired:
         return False
-    return not _group_exists(child.pid)
+
+    for _ in range(20):
+        adopted = _descendant_pids(os.getpid()) - baseline_pids - {child.pid}
+        _kill_pids(adopted)
+        _reap_children()
+        if not adopted:
+            break
+        time.sleep(0.01)
+    return not _group_exists(child.pid) and not (
+        _descendant_pids(os.getpid()) - baseline_pids - {child.pid}
+    )
 
 
 def _atomic_write(path: Path, payload: bytes) -> None:
@@ -197,10 +280,12 @@ def run_local(
         raise ContractError("max_output_bytes must be a positive bounded integer")
     timeout = timeout_seconds or float(manifest["timeout_seconds"])
     child = None
+    baseline_pids = _descendant_pids(os.getpid())
     selector = selectors.DefaultSelector()
     captured = 0
     teardown_verified = False
     try:
+        _enable_child_subreaper()
         child = subprocess.Popen(
             list(command),
             stdout=subprocess.PIPE,
@@ -218,7 +303,7 @@ def run_local(
         while selector.get_map():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
-                teardown_verified = _terminate_group(child)
+                teardown_verified = _terminate_group(child, baseline_pids)
                 result = {
                     "run_id": manifest["run_id"],
                     "manifest_sha256": manifest_sha256(manifest),
@@ -243,14 +328,14 @@ def run_local(
                     continue
                 captured += len(chunk)
                 if captured > max_output_bytes:
-                    teardown_verified = _terminate_group(child)
+                    teardown_verified = _terminate_group(child, baseline_pids)
                     raise ContractError(
                         f"process exceeded bounded output limit; teardown_verified={teardown_verified}"
                     )
         child.wait(timeout=max(0.01, deadline - time.monotonic()))
-        teardown_verified = _terminate_group(child)
+        teardown_verified = _terminate_group(child, baseline_pids)
     except subprocess.TimeoutExpired:
-        teardown_verified = _terminate_group(child) if child is not None else False
+        teardown_verified = _terminate_group(child, baseline_pids) if child is not None else False
         result = {
             "run_id": manifest["run_id"],
             "manifest_sha256": manifest_sha256(manifest),
