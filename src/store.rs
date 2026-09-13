@@ -3303,10 +3303,7 @@ impl MnemesStore {
     }
 
     /// Refresh only catalog counters after a canonical shard mutation.
-    pub async fn refresh_shard_counts(
-        &self,
-        device_id: &DeviceId,
-    ) -> Result<(), MnemesError> {
+    pub async fn refresh_shard_counts(&self, device_id: &DeviceId) -> Result<(), MnemesError> {
         let memory = self.device_memory(device_id).await?;
         let stats = memory.stats().await?;
         let conn = self.pool_conn.lock().await;
