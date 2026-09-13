@@ -103,6 +103,33 @@ class CandidateValidationTests(unittest.TestCase):
                     max_output_bytes=32,
                 )
 
+    def test_detached_descendant_is_terminated(self):
+        if sys.platform != "linux":
+            self.skipTest("Linux subreaper containment is required for this regression")
+        import time
+
+        with tempfile.TemporaryDirectory() as directory:
+            result_path = Path(directory) / "result.json"
+            marker = Path(directory) / "escaped.txt"
+            payload = result()
+            descendant_code = (
+                "import time; time.sleep(0.2); "
+                + f"open({str(marker)!r}, 'w', encoding='utf-8').write('escaped')"
+            )
+            command_code = (
+                "import json, subprocess, sys\n"
+                + f"subprocess.Popen([sys.executable, '-c', {descendant_code!r}], start_new_session=True)\n"
+                + f"open({str(result_path)!r}, 'w', encoding='utf-8').write({json.dumps(json.dumps(payload))!r})"
+            )
+            observed = run_local(
+                MANIFEST,
+                [sys.executable, "-c", command_code],
+                result_path,
+            )
+            self.assertTrue(observed["evidence"]["teardown_verified"])
+            time.sleep(0.3)
+            self.assertFalse(marker.exists())
+
     def test_run_id_mismatch_is_rejected(self):
         payload = result()
         payload["run_id"] = "other"
