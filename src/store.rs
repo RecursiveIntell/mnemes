@@ -3981,6 +3981,16 @@ impl MnemesStore {
         let shards = self.list_shards().await?;
         let mut statuses = Vec::with_capacity(shards.len());
         for shard in shards {
+            let shard_path = self.device_shard_path(&shard.device_id).join("memory.db");
+            if let Err(error) = std::fs::metadata(&shard_path) {
+                statuses.push(ShardIntegrityStatus {
+                    device_id: shard.device_id,
+                    relative_path: shard.relative_path,
+                    status: "failed".to_string(),
+                    detail: format!("cataloged shard database unavailable: {error}"),
+                });
+                continue;
+            }
             let (status, detail) = match self.device_memory(&shard.device_id).await {
                 Ok(memory) => match memory
                     .verify_integrity(semantic_memory::VerifyMode::Quick)
