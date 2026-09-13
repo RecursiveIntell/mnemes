@@ -498,6 +498,19 @@ async fn shard_stats_does_not_recreate_legacy_global_memory_db() {
     assert!(!temp.path().join("pooled-store/memory/memory.db").exists());
 }
 
+ 
+#[tokio::test]
+async fn synced_fact_refreshes_catalog_semantic_counts() {
+    let (_temp, store) = open_store(2);
+    let device = register(&store, "counted").await;
+    store
+        .sync_fact_to_shard(&device, "source-1", "notes", "count me", None, None)
+        .await
+        .unwrap();
+    let stats = store.shard_stats().await.unwrap();
+    assert_eq!(stats.total_facts, 1);
+}
+
 #[tokio::test]
 async fn verify_missing_cataloged_shard_reports_loss_without_recreating_database() {
     let (temp, store) = open_store(2);
