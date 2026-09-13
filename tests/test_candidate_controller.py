@@ -97,6 +97,33 @@ class ControllerTests(unittest.TestCase):
             self.assertTrue(reconciled["accepted"])
             self.assertTrue((target / "attempts" / "1.json").is_file())
 
+    def test_truncated_artifact_is_replaced_on_reconciliation(self):
+        driver = load(self)
+        with tempfile.TemporaryDirectory() as raw:
+            target = Path(raw) / "evidence"; transport = Transport()
+            target.mkdir()
+            (target / "result.json").write_bytes(json.dumps(transport.result).encode())
+            (target / "stdout.log").write_bytes(b"")
+            (target / "stderr.log").write_bytes(b"partial")
+            (target / "controller.json").write_text(
+                json.dumps({"run_id": transport.run_id, "state": "evidence_pending"}),
+                encoding="utf-8",
+            )
+            result = self.collect(driver, transport, target)
+            self.assertTrue(result["accepted"])
+            self.assertIn("stderr.log", transport.fetch_calls)
+
+    def test_expected_refusal_cannot_accept_zero_exit(self):
+        driver = load(self)
+        with tempfile.TemporaryDirectory() as raw:
+            transport = Transport()
+            transport.remote_exit = 0
+            transport.result["exit_code"] = 0
+            result = self.collect(driver, transport, Path(raw) / "evidence")
+            self.assertFalse(result["accepted"])
+            self.assertEqual(result["state"], "rejected")
+            self.assertIn("successfully", result["reason"])
+
     def test_remote_failure_cannot_become_controller_success(self):
         driver = load(self)
         for field, value in [("outcome", "prelaunch_failure"), ("teardown_verified", False), ("manifest_sha256", "b"*64)]:
