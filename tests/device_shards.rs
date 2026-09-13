@@ -498,7 +498,6 @@ async fn shard_stats_does_not_recreate_legacy_global_memory_db() {
     assert!(!temp.path().join("pooled-store/memory/memory.db").exists());
 }
 
- 
 #[tokio::test]
 async fn synced_fact_refreshes_catalog_semantic_counts() {
     let (_temp, store) = open_store(2);
