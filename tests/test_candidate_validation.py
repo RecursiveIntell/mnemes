@@ -113,7 +113,7 @@ class CandidateValidationTests(unittest.TestCase):
             marker = Path(directory) / "escaped.txt"
             payload = result()
             descendant_code = (
-                "import time; time.sleep(0.2); "
+                "import time; time.sleep(2); "
                 + f"open({str(marker)!r}, 'w', encoding='utf-8').write('escaped')"
             )
             command_code = (
