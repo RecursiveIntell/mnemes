@@ -8,7 +8,7 @@
 
 [![crates.io](https://img.shields.io/crates/v/mnemes.svg?style=flat-square&color=6c5ce7)](https://crates.io/crates/mnemes)
 [![docs.rs](https://img.shields.io/docsrs/mnemes?style=flat-square&color=74b9ff)](https://docs.rs/mnemes)
-[![license](https://img.shields.io/badge/license-Apache--2.0-00b894?style=flat-square)](LICENSE)
+[![license](https://img.shields.io/badge/license-Apache--2.0-00b894?style=flat-square)](#license)
 [![Rust](https://img.shields.io/badge/rust-1.75%2B-f76707?style=flat-square)](https://www.rust-lang.org/)
 [![semantic-memory](https://img.shields.io/badge/powered%20by-semantic--memory-a29bfe?style=flat-square)](https://github.com/RecursiveIntell/semantic-memory)
 
@@ -876,6 +876,8 @@ Libraries/                       # Canonical workspace
 ---
 
 ## License
+
+The package manifest declares Apache-2.0, but this repository currently has no standalone LICENSE file. The declaration is preserved; the missing text should be reconciled by the maintainer before redistribution.
 
 Apache-2.0
 
