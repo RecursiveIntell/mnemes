@@ -226,24 +226,41 @@ LockPersonality=true
 WantedBy=default.target
 ```
 
+For first-time setup, run this as the service user.  The subshell creates the directory as mode `0700` and the environment file as mode `0600` before writing any values, even when the caller's umask is `022`.  It refuses an existing `server.env` or a symlinked or non-owned Mnemes configuration directory.  If the file already exists, preserve its settings, verify the path and ownership, and restrict the directory to `0700` and the file to `0600` before adding any secret.
+
 ```bash
-mkdir -p ~/.config/mnemes
-cat > ~/.config/mnemes/server.env << 'EOF'
+(
+  set -eu
+  umask 077
+  config_dir="$HOME/.config/mnemes"
+  env_file="$config_dir/server.env"
+  if [ -L "$config_dir" ] || [ -e "$env_file" ] || [ -L "$env_file" ]; then
+    printf '%s\n' 'Refusing existing server.env or symlinked config directory; preserve and secure it first.' >&2
+    exit 1
+  fi
+  mkdir -p "$config_dir" || exit 1
+  if [ ! -d "$config_dir" ] || [ -L "$config_dir" ] || [ ! -O "$config_dir" ]; then
+    printf '%s\n' 'Configuration directory must be a real directory owned by the service user.' >&2
+    exit 1
+  fi
+  chmod 700 "$config_dir" || exit 1
+  set -C  # Refuse to overwrite an existing file at redirection time, too
+  cat > "$env_file" << 'EOF'
 MNEMES_PORT=1738
 MNEMES_DATA_DIR=/home/you/.local/share/mnemes
 # MNEMES_EMBEDDER=ollama
 # MNEMES_OLLAMA_URL=http://127.0.0.1:11434
 # HF_HUB_OFFLINE=1
 EOF
-
-systemctl --user daemon-reload
-systemctl --user enable --now mnemes.service
+) &&
+systemctl --user daemon-reload &&
+systemctl --user enable --now mnemes.service &&
 systemctl --user is-active mnemes.service  # → active
 ```
 
 ### 5. Connect a device
 
-HTTP registration uses the server's `BOOTSTRAP_SECRET`, not an operator device credential.  If that variable is unset, only the first device in an empty store may register; after the CLI bootstrap above, registration is closed.  To enroll additional devices, configure `BOOTSTRAP_SECRET` in the server's private environment, restart the server, and use that secret as the Bearer token.  Remove it and restart after enrollment.
+HTTP registration uses the server's `BOOTSTRAP_SECRET`, not an operator device credential.  If that variable is unset, only the first device in an empty store may register; after the CLI bootstrap above, registration is closed.  To enroll additional devices, add `BOOTSTRAP_SECRET` to the owner-only `server.env` prepared above, keeping its mode `0600` (including after editor saves), restart the server, and use that secret as the Bearer token.  Remove it and restart after enrollment.
 
 The server binds to loopback.  Run this request on the server host, or replace the base URL with the tailnet-only HTTPS URL configured by Tailscale Serve:
 
