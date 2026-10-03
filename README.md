@@ -60,11 +60,13 @@
 
 Mnemes is the **product surface** of a three-crate stack:
 
-| Crate | Version | Role |
-|-------|---------|------|
-| [`semantic-memory`](https://crates.io/crates/semantic-memory) | v0.5.14 | Core library: SQLite store, HNSW vectors, FTS5 search, knowledge graph, trust ledger |
-| [`semantic-memory-mcp`](https://crates.io/crates/semantic-memory-mcp) | v0.5.6 | MCP server: runtime-profiled tools for AI agents via stdio JSON-RPC |
+| Crate | Source version | Role |
+|-------|----------------|------|
+| [`semantic-memory`](https://github.com/RecursiveIntell/Libraries/blob/8f0e7b8d45d38eabc6302a190e8686abd109b1a2/semantic-memory/Cargo.toml) | v0.5.15 (pinned dependency) | Core library: SQLite store, HNSW vectors, FTS5 search, knowledge graph, trust ledger |
+| [`semantic-memory-mcp`](https://github.com/RecursiveIntell/semantic-memory-mcp/blob/f20c9d6fde7f30f5f7fbfbd80f6148a7023aaac7/Cargo.toml) | v0.5.8 (related package) | MCP server: runtime-profiled tools for AI agents via stdio JSON-RPC |
 | **`mnemes`** (this crate) | v0.1.1 | Multi-device control plane: identity, routing, replication, pooled memory |
+
+These are source-declared versions, not a claim that the same revisions are published on crates.io.  Current Mnemes source uses the sibling Libraries checkout below; the MCP package is a separate integration.
 
 ## How it works
 
@@ -130,21 +132,29 @@ Mnemes runs as a standalone HTTP server on any machine you choose — a home ser
 
 ### 1. Install the binaries
 
-```bash
-# From crates.io (recommended)
-cargo install mnemes --locked
+Current source requires `../Libraries/semantic-memory` (source version `0.5.15`).  The [manifest](Cargo.toml) records that the required journal supersede API is not yet in a published semantic-memory release.  A single Mnemes checkout is therefore insufficient.  Run these commands from a common parent directory, using the Libraries revision pinned by [`LIBRARIES_REF` in CI](.github/workflows/ci.yml):
 
-# Or from source
+```bash
+# Current source: side-by-side checkouts
 git clone https://github.com/RecursiveIntell/mnemes.git
+git clone https://github.com/RecursiveIntell/Libraries.git
+git -C Libraries checkout 8f0e7b8d45d38eabc6302a190e8686abd109b1a2
 cd mnemes
-cargo install --path .
+cargo install --path . --locked
 ```
 
-This gives you two binaries:
+For a registry installation, the command below selects a published artifact rather than this source checkout. Verify package availability and use the documentation for the installed version; its API and binaries may differ from current source.
+
+```bash
+cargo install mnemes --locked
+```
+
+Current source provides three binaries:
 - `mnemes-server` — the HTTP server
 - `mnemes-admin` — the bootstrap/admin CLI
+- `mnemes-sync-client` — the signed fact-create replication sender
 
-For a guided host install that also offers private anywhere-access:
+With the sibling Libraries checkout in place, a guided source install can also offer private anywhere-access:
 
 ```bash
 ./install.sh --from-source --with-tailscale
@@ -187,8 +197,8 @@ Save the `device_id` and `credential` — you'll need them to connect devices.
 # Basic: start on port 1738 with data at ~/.local/share/mnemes
 mnemes-server 1738 ~/.local/share/mnemes
 
-# With environment variables
-MNEMES_PORT=1738 MNEMES_DATA_DIR=~/.local/share/mnemes mnemes-server
+# Select the data directory via environment; pass the port positionally
+MNEMES_DATA_DIR=~/.local/share/mnemes mnemes-server 1738
 ```
 
 ### 4. Run as a systemd service (recommended)
@@ -233,9 +243,13 @@ systemctl --user is-active mnemes.service  # → active
 
 ### 5. Connect a device
 
+HTTP registration uses the server's `BOOTSTRAP_SECRET`, not an operator device credential.  If that variable is unset, only the first device in an empty store may register; after the CLI bootstrap above, registration is closed.  To enroll additional devices, configure `BOOTSTRAP_SECRET` in the server's private environment, restart the server, and use that secret as the Bearer token.  Remove it and restart after enrollment.
+
+The server binds to loopback.  Run this request on the server host, or replace the base URL with the tailnet-only HTTPS URL configured by Tailscale Serve:
+
 ```bash
-curl -X POST http://your-server:1738/v1/devices/register \
-  -H "Authorization: Bearer <opera...ial>" \
+curl -X POST http://127.0.0.1:1738/v1/devices/register \
+  -H "Authorization: Bearer <bootstrap-secret>" \
   -H "Content-Type: application/json" \
   -d '{"label":"laptop","platform":"linux","hostname":"mylaptop.local"}'
 ```
@@ -243,8 +257,12 @@ curl -X POST http://your-server:1738/v1/devices/register \
 ### 6. Verify
 
 ```bash
-# Health check
-curl http://127.0.0.1:1738/v1/health
+# Liveness check (no credential required)
+curl http://127.0.0.1:1738/livez
+
+# Full health (requires a device credential)
+curl http://127.0.0.1:1738/v1/health \
+  -H "Authorization: Bearer <device-credential>"
 
 # Search (requires auth)
 curl -X POST http://127.0.0.1:1738/v1/search/witnessed \
@@ -364,10 +382,10 @@ println!("Searched {} of {} eligible shards",
 
 | Method | Endpoint | Description |
 | --- | --- | --- |
-| `GET` | `/livez`, `/healthz` | Liveness/readiness check |
-| `GET` | `/v1/health` | Full health with embedding model info |
+| `GET` | `/livez`, `/v1/livez` | Unauthenticated liveness check |
+| `GET` | `/healthz`, `/v1/health` | Authenticated full health with embedding model info |
 | `GET` | `/v1/integrity` | SQLite integrity check across all shards |
-| `POST` | `/v1/devices/register` | Register a new device, returns credential |
+| `POST` | `/v1/devices/register` | Register a device using `BOOTSTRAP_SECRET`, or the first device in an empty store when the secret is unset; returns a credential |
 | `GET` | `/v1/devices` | List registered devices |
 | `POST` | `/v1/devices/:id/heartbeat` | Device heartbeat |
 | `POST` | `/v1/devices/:id/rotate` | Rotate device credential |
@@ -380,12 +398,12 @@ println!("Searched {} of {} eligible shards",
 | `GET` | `/v1/operations/:id` | Get a specific operation |
 | `POST` | `/v1/search/witnessed` | Routed witnessed search |
 | `POST` | `/v1/replication/fact-create/v1` | Typed signed fact-create replay: verify signature/key/scope, apply atomically, return a durable ACK |
-| `POST` | `/v1/sync` | **Legacy endpoint, disabled** — always returns `501 SYNC_DISABLED` before auth/body parsing |
+| `POST` | `/v1/sync`, `/v1/sync/facts` | **Legacy endpoints, disabled** — return `501 SYNC_DISABLED` before auth/body parsing |
 | `GET` | `/v1/receipts/:id` | Retrieve a durable receipt |
 | `GET` | `/v1/audit/events` | List audit events |
 | `POST` | `/mcp`, `/v1/mcp` | MCP JSON-RPC over HTTP |
 
-All endpoints require a Bearer token (device credential). The server **fails closed** — no valid credential means no access.
+Memory, health, integrity, device-management, and MCP handlers require a valid Bearer device credential.  The exceptions are unauthenticated liveness (`/livez`, `/v1/livez`), the separately gated registration route described above, and disabled legacy sync routes that reject requests before authentication.
 
 ### MCP tool profiles
 
@@ -798,7 +816,7 @@ binary version with any benchmark report.
 
 ```
 MCP stdio (local proc) → Tool Router (auth-less, local only)
-HTTP :1738             → Bearer Token Gate (all endpoints)
+HTTP :1738             → Bearer device credentials for protected handlers
                          → Governed Access Layer (purpose-isolated)
                            → SQLite File (filesystem ACLs)
 ```
@@ -808,7 +826,7 @@ HTTP :1738             → Bearer Token Gate (all endpoints)
 | Surface | Risk | Mitigation |
 |---------|------|------------|
 | MCP stdio | Local process only | JSON-RPC parsing, no network exposure |
-| HTTP admin | Network-accessible | Bearer token on ALL endpoints |
+| HTTP admin | Loopback listener; optional tailnet HTTPS proxy | Device credentials for protected handlers; separate registration gate; liveness-only unauthenticated |
 | SQLite file | Filesystem access | Unix permissions; sensitivity classes |
 | Ollama embeds | Local network call | Same-host deployment |
 | Fact injection | Text in LLM context | Sensitivity gates; governed recall |
@@ -834,7 +852,8 @@ mnemes/                          # This crate
 ├── src/
 │   ├── bin/
 │   │   ├── mnemes-server.rs     # HTTP server binary
-│   │   └── mnemes-admin.rs      # Bootstrap/admin CLI
+│   │   ├── mnemes-admin.rs      # Bootstrap/admin CLI
+│   │   └── mnemes-sync-client.rs # Signed fact-create sender
 │   ├── lib.rs                   # Library root
 │   ├── store.rs                 # MnemesStore: multi-device control plane
 │   ├── routing.rs               # Sparse shard routing
@@ -852,15 +871,16 @@ mnemes/                          # This crate
 └── Cargo.toml
 ```
 
-### Dependent crates (workspace members)
+### Source dependency layout
 
 ```
-Libraries/                       # Canonical workspace
-├── semantic-memory/             # Core library (v0.5.14)
-├── semantic-memory-mcp/         # MCP server binary (v0.5.6)
-├── semantic-memory-forge/       # Build/dev tooling
-└── agent-graph-mcp/             # Graph-orchestrated LLM workflows
+<checkout-parent>/
+├── mnemes/                      # Control plane (source v0.1.1)
+└── Libraries/                   # Sibling checkout pinned by CI
+    └── semantic-memory/         # Core library (source v0.5.15)
 ```
+
+The related [`semantic-memory-mcp`](https://github.com/RecursiveIntell/semantic-memory-mcp) repository is separately versioned (source v0.5.8).  It is not required for this Mnemes source build.
 
 ---
 
