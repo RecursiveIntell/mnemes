@@ -243,7 +243,7 @@ For first-time setup, run this as the service user.  The subshell creates the di
     printf '%s\n' 'Configuration directory must be a real directory owned by the service user.' >&2
     exit 1
   fi
-  chmod 700 "$config_dir" || exit 1
+  chmod 00700 "$config_dir" || exit 1
   set -C  # Refuse to overwrite an existing file at redirection time, too
   cat > "$env_file" << 'EOF'
 MNEMES_PORT=1738
