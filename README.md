@@ -385,7 +385,7 @@ println!("Searched {} of {} eligible shards",
     receipt.eligible_shards.len());
 ```
 
-This lower-level receipt contract does not mean every wrapper returns the route receipt. On the active-shard path, the unprofiled HTTP `/v1/search/witnessed` wrapper currently discards `routed.routing_receipt`; its semantic-memory `receipt` is `None`, omitted from JSON, with `receipt_stored: false`. The actor-bound `/v1/search/profile/witnessed` route and `sm_search_profile_witnessed` MCP tool return the persisted `ProfileRoutingReceipt` and fail closed if it cannot be read back.
+This lower-level receipt contract does not mean every wrapper returns the route receipt. Both the unprofiled HTTP `/v1/search/witnessed` route and the MCP `sm_search_witnessed` tool call `run_witnessed_search`; for active-shard searches, that function discards `routed.routing_receipt` and returns `receipt: None` and `receipt_stored: false`. Because the `receipt` field is omitted when `None`, neither unprofiled wrapper returns the routed receipt. By contrast, the actor-bound `/v1/search/profile/witnessed` route and `sm_search_profile_witnessed` MCP tool return the persisted `ProfileRoutingReceipt` and fail closed if it cannot be read back.
 
 ---
 
@@ -429,7 +429,7 @@ Memory, health, integrity, device-management, and MCP handlers require a valid B
 
 | Profile | Tools | Access |
 | --- | --- | --- |
-| `agent` (default) | Bounded device, actor, and operation lookups; witnessed search, stats/health, and self-heartbeat | No operator-only management tools |
+| `agent` (default) | `sm_list_devices` lists all registered devices; `sm_get_device` and `sm_get_actor` are scoped to the authenticated device, and `sm_get_operation` to the authenticated device and actor; witnessed search, stats/health, and self-heartbeat | No operator-only management tools |
 | `operator` | Agent tools plus device/actor registration, operation submission, credential rotation/revocation, and integrity verification | Operator management actions |
 
 ### Admin CLI
