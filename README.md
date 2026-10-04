@@ -385,6 +385,8 @@ println!("Searched {} of {} eligible shards",
     receipt.eligible_shards.len());
 ```
 
+This lower-level receipt contract does not mean every wrapper returns the route receipt. On the active-shard path, the unprofiled HTTP `/v1/search/witnessed` wrapper currently discards `routed.routing_receipt`; its semantic-memory `receipt` is `None`, omitted from JSON, with `receipt_stored: false`. The actor-bound `/v1/search/profile/witnessed` route and `sm_search_profile_witnessed` MCP tool return the persisted `ProfileRoutingReceipt` and fail closed if it cannot be read back.
+
 ---
 
 <p align="center">
@@ -413,7 +415,8 @@ println!("Searched {} of {} eligible shards",
 | `POST` | `/v1/operations` | Submit an idempotent operation envelope |
 | `GET` | `/v1/operations` | List operations (filter by device/actor) |
 | `GET` | `/v1/operations/:id` | Get a specific operation |
-| `POST` | `/v1/search/witnessed` | Routed witnessed search |
+| `POST` | `/v1/search/witnessed` | Unprofiled witnessed search; active-shard routing omits the semantic-memory receipt (see caveat below). |
+| `POST` | `/v1/search/profile/witnessed` | Actor-bound, profile-authorized routed search; returns a persisted `ProfileRoutingReceipt`. |
 | `POST` | `/v1/replication/fact-create/v1` | Typed signed fact-create replay: verify signature/key/scope, apply atomically, return a durable ACK |
 | `POST` | `/v1/sync`, `/v1/sync/facts` | **Legacy endpoints, disabled** — return `501 SYNC_DISABLED` before auth/body parsing |
 | `GET` | `/v1/receipts/:id` | Retrieve a durable receipt |
@@ -426,8 +429,8 @@ Memory, health, integrity, device-management, and MCP handlers require a valid B
 
 | Profile | Tools | Access |
 | --- | --- | --- |
-| `agent` (default) | Read-only: search, get fact, graph path, namespaces, authority decisions, receipts, replay | No writes, no device management |
-| `operator` | All agent tools + device registration, actor registration, operation submission, heartbeat, credential rotation, revocation | Full operational access |
+| `agent` (default) | Bounded device, actor, and operation lookups; witnessed search, stats/health, and self-heartbeat | No operator-only management tools |
+| `operator` | Agent tools plus device/actor registration, operation submission, credential rotation/revocation, and integrity verification | Operator management actions |
 
 ### Admin CLI
 
