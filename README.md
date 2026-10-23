@@ -2,6 +2,8 @@
 
 # Mnemes
 
+<!-- last-verified: 2026-10-23 -->
+
 ### Multi-device memory control plane for local-first AI agents
 
 **Device-owned · Bitemporal · Provenance-backed · Idempotent**
@@ -200,6 +202,8 @@ mnemes-server 1738 ~/.local/share/mnemes
 # Select the data directory via environment; pass the port positionally
 MNEMES_DATA_DIR=~/.local/share/mnemes mnemes-server 1738
 ```
+
+In current source, `mnemes-server` accepts positional `[PORT] [DATA_DIR]` (defaults: `3000` and `./data/mnemes`); `MNEMES_DATA_DIR`, when set, overrides the positional data directory. `mnemes-server -h` / `mnemes-server --help` prints this usage. The server requires `MNEMES_RUN_PACK_ATTESTATION_KEY_HEX` to decode to at least 32 bytes for run-pack observation imports. Imports are rejected when it is unset; malformed values prevent server startup. Do not commit this key. For the sample systemd user service, configure it in the service's `EnvironmentFile` (`~/.config/mnemes/server.env`) and follow the owner-only file setup above.
 
 ### 4. Run as a systemd service (recommended)
 
@@ -418,6 +422,7 @@ This lower-level receipt contract does not mean every wrapper returns the route 
 | `POST` | `/v1/search/witnessed` | Unprofiled witnessed search; active-shard routing omits the semantic-memory receipt (see caveat below). |
 | `POST` | `/v1/search/profile/witnessed` | Actor-bound, profile-authorized routed search; returns a persisted `ProfileRoutingReceipt`. |
 | `POST` | `/v1/replication/fact-create/v1` | Typed signed fact-create replay: verify signature/key/scope, apply atomically, return a durable ACK |
+| `POST` | `/v1/run-pack-observations` | Import a run-pack observation after authenticating the submitting device and validating the server-attested admission witness; requires the configured key described above. |
 | `POST` | `/v1/sync`, `/v1/sync/facts` | **Legacy endpoints, disabled** — return `501 SYNC_DISABLED` before auth/body parsing |
 | `GET` | `/v1/receipts/:id` | Retrieve a durable receipt |
 | `GET` | `/v1/audit/events` | List audit events |
@@ -456,7 +461,7 @@ mnemes-admin fact-create-admit <DATA_DIR> <DEVICE_ID> <STORE_ID> <NAMESPACE> \
   <ACTIVATED_AT_UNIX> <CUTOFF_AT_UNIX> <STREAM_EPOCH> <FENCING_TOKEN>
 ```
 
-Revocation is immediate and durable: `mnemes-admin fact-create-revoke`.
+Use `mnemes-admin fact-create-revoke` to revoke a fact-create admission and `mnemes-admin fact-supersede-revoke` to revoke a fact-supersede admission. The latter affects staged admission state; it does not make the quarantined HTTP route available in the normal server router.
 
 ---
 
@@ -483,10 +488,12 @@ mnemes-sync-client --db <store>/memory.db \
   --home-device-id <DEVICE_ID> --store-id <STORE_ID> --stream-epoch N \
   --key <32-byte-seed-file> --principal <PRINCIPAL_ID> --key-version 1 \
   --fencing-token <TOKEN> --url http://127.0.0.1:<PORT> \
-  --credential-file <env-with-MNEME_CREDENTIAL> [--watermark <path>]
+  --credential-file <env-with-MNEME_CREDENTIAL> [--watermark <path>] [--observed-at <UNIX_SECONDS>]
 ```
 
 - One record per invocation; the caller (timer, hook, cron) decides cadence.
+- `--observed-at` supplies the observation time in Unix seconds; it defaults to the current Unix time. If omitted, `--credential-file` defaults to `$HOME/.config/mnemes/client.env` (which must define `MNEME_CREDENTIAL`) and `--watermark` defaults to `$HOME/.local/state/mnemes/fact-create-watermark.json`.
+- The `--key` path may hold the 32-byte seed as hex (the format written by `--gen-key <path>`). That command creates the file with mode `0600` and prints the Ed25519 public verifying key for `fact-create-admit`; this sender key is separate from the server's run-pack attestation key. Keep the seed private.
 - The watermark stores `next_sequence` (the next expected record) and is
   written atomically only after a typed `Accepted` ACK — never on transport,
   auth, admission, or parse errors. A restored/stale watermark replays the
