@@ -203,7 +203,7 @@ mnemes-server 1738 ~/.local/share/mnemes
 MNEMES_DATA_DIR=~/.local/share/mnemes mnemes-server 1738
 ```
 
-In current source, `mnemes-server` accepts positional `[PORT] [DATA_DIR]` (defaults: `3000` and `./data/mnemes`); `MNEMES_DATA_DIR`, when set, overrides the positional data directory. `mnemes-server -h` / `mnemes-server --help` prints this usage. The server requires `MNEMES_RUN_PACK_ATTESTATION_KEY_HEX` to decode to at least 32 bytes for run-pack observation imports. Imports are rejected when it is unset; malformed values prevent server startup. Do not commit this key. For the sample systemd user service, configure it in the service's `EnvironmentFile` (`~/.config/mnemes/server.env`) and follow the owner-only file setup above.
+In current source, `mnemes-server` accepts positional `[PORT] [DATA_DIR]` (defaults: `3000` and `./data/mnemes`); `MNEMES_DATA_DIR`, when non-empty, overrides the positional data directory. `mnemes-server -h` / `mnemes-server --help` prints this usage. The server requires `MNEMES_RUN_PACK_ATTESTATION_KEY_HEX` to decode to at least 32 bytes for run-pack observation imports. Imports are rejected when it is unset; malformed values prevent server startup. Do not commit this key. For the sample systemd user service, configure it in the service's `EnvironmentFile` (`~/.config/mnemes/server.env`) and follow the owner-only file setup below.
 
 ### 4. Run as a systemd service (recommended)
 
@@ -493,7 +493,7 @@ mnemes-sync-client --db <store>/memory.db \
 
 - One record per invocation; the caller (timer, hook, cron) decides cadence.
 - `--observed-at` supplies the observation time in Unix seconds; it defaults to the current Unix time. If omitted, `--credential-file` defaults to `$HOME/.config/mnemes/client.env` (which must define `MNEME_CREDENTIAL`) and `--watermark` defaults to `$HOME/.local/state/mnemes/fact-create-watermark.json`.
-- The `--key` path may hold the 32-byte seed as hex (the format written by `--gen-key <path>`). That command creates the file with mode `0600` and prints the Ed25519 public verifying key for `fact-create-admit`; this sender key is separate from the server's run-pack attestation key. Keep the seed private.
+- The `--key` path may hold the 32-byte seed as hex (the format written by `--gen-key <path>`). The current generator writes the seed before changing the file mode to `0600`; it can overwrite an existing target and follows symlinks. Before invoking it, set `umask 077` and choose a fresh, non-existing file path inside a real directory you own with mode `0700`; do not use an existing file or symlink. It prints the Ed25519 public verifying key for `fact-create-admit`. This sender key is separate from the server's run-pack attestation key. Keep the seed private.
 - The watermark stores `next_sequence` (the next expected record) and is
   written atomically only after a typed `Accepted` ACK — never on transport,
   auth, admission, or parse errors. A restored/stale watermark replays the
