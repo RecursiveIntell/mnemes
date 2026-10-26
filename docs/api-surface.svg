@@ -49,7 +49,7 @@
   <rect x="60" y="355" width="460" height="100" rx="8" fill="#0d1117" stroke="#30363d" stroke-width="1"/>
   <text x="80" y="375" font-size="11" font-weight="600" fill="#fdcb6e">Operations</text>
   <text x="80" y="395" font-size="9" fill="#c9d1d9" font-family="monospace">POST   /v1/operations</text>
-  <text x="80" y="412" font-size="9" fill="#c9d1d9" font-family="monospace">GET    /v1/operations?device_id=&actor_id=</text>
+  <text x="80" y="412" font-size="9" fill="#c9d1d9" font-family="monospace">GET    /v1/operations?device_id=&amp;actor_id=</text>
   <text x="80" y="429" font-size="9" fill="#c9d1d9" font-family="monospace">GET    /v1/operations/:id</text>
 
   <!-- Search & Evidence -->
