@@ -91,7 +91,7 @@ memory/shards/<device_uuid>/memory.db  ←  one semantic-memory store per device
     └── provenance, authority, search receipts
 ```
 
-The control plane and semantic stores are **physically separate**. `pooled.db` owns pooling metadata and receipts. Each `memory.db` is owned by the `semantic-memory` engine. Once replication is implemented, the home-device generation is canonical and the server generation is a replayable replica.
+The control plane and semantic stores are **physically separate**. `pooled.db` owns pooling metadata and receipts. Each `memory.db` is owned by the `semantic-memory` engine. When an admitted fact-create journal entry is available, the current path sends one entry per invocation from the home device to its corresponding server shard; the home device remains the canonical source. Other mutation families are not yet admitted, so this is not full-store synchronization.
 
 ### Embedding provider selection
 
