@@ -2,7 +2,7 @@
 
 # Mnemes
 
-<!-- last-verified: 2026-10-23 -->
+<!-- last-verified: 2026-10-28 -->
 
 ### Multi-device memory control plane for local-first AI agents
 
@@ -255,6 +255,9 @@ MNEMES_DATA_DIR=/home/you/.local/share/mnemes
 # MNEMES_EMBEDDER=ollama
 # MNEMES_OLLAMA_URL=http://127.0.0.1:11434
 # HF_HUB_OFFLINE=1
+# Only needed for /v1/run-pack-observations; keep this server key private.
+# Supply at least 32 bytes of random key material, hex-encoded.
+# MNEMES_RUN_PACK_ATTESTATION_KEY_HEX=<hex-encoded-secret>
 EOF
 ) &&
 systemctl --user daemon-reload &&
