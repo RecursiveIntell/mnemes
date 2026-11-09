@@ -72,7 +72,8 @@ async fn open_store() -> (TempDir, MnemesStore) {
 
 async fn spawn_server() -> RunningServer {
     let (temp, store) = open_store().await;
-    let app = build_router(store);
+    // The fixture is an operator enabling first-device setup for its own server only.
+    let app = mnemes::server::build_router_allowing_first_device_setup(store);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap();
@@ -93,7 +94,7 @@ async fn spawn_server() -> RunningServer {
 
 #[cfg(feature = "server")]
 async fn spawn_server_with_store(_temp: TempDir, store: MnemesStore) -> RunningServer {
-    let app = build_router(store);
+    let app = mnemes::server::build_router_allowing_first_device_setup(store);
     let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
         .await
         .unwrap();
@@ -137,6 +138,9 @@ async fn spawn_staged_fact_supersede_server_with_store(
 }
 
 async fn register_device(server: &RunningServer, client: &Client) -> DeviceIdentity {
+    // Phase 6.3: first-device setup is an explicit operator opt-in, not an anonymous default.
+    // The fixture acts as that operator. The opt-in is set only in this helper's process
+    // scope and only for registrations that establish the initial device.
     let response = client
         .post(format!("{}/v1/devices/register", server.base_url))
         .json(&json!({
@@ -2350,4 +2354,37 @@ async fn fact_supersede_http_reports_changed_same_sequence_owner_envelope_as_con
     let temp = server.stop_keep_temp().await;
     assert_eq!(supersede_ack_count(&temp, "owner-supersede-fork"), 0);
     assert_eq!(supersede_inbox_next_sequence(&temp, &device.device_id), 3);
+}
+
+// Phase 6.3 RED: the PRODUCTION default router with no BOOTSTRAP_SECRET and an empty
+// device store must not let an unauthenticated caller self-enroll. The fixture router
+// (build_router_allowing_first_device_setup) is deliberately not used here.
+#[tokio::test]
+async fn unauthenticated_first_device_self_enrollment_is_refused_without_bootstrap_secret() {
+    let (temp, store) = open_store().await;
+    let app = mnemes::server::build_router(store);
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let base_url = format!("http://{}", listener.local_addr().unwrap());
+    let handle = tokio::spawn(async move {
+        axum::serve(listener, app).await.unwrap();
+    });
+    let client = Client::new();
+    let response = client
+        .post(format!("{base_url}/v1/devices/register"))
+        .json(&json!({
+            "label": "self-enrolled",
+            "platform": "linux",
+            "hostname": "localhost",
+        }))
+        .send()
+        .await
+        .unwrap();
+    let status = response.status();
+    handle.abort();
+    drop(temp);
+    assert_ne!(
+        status,
+        StatusCode::CREATED,
+        "an empty store with no bootstrap secret must not let an unauthenticated caller enroll"
+    );
 }
