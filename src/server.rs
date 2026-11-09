@@ -716,7 +716,17 @@ async fn fact_supersede_handler(
         .into_response()
 }
 
-#[cfg(feature = "server")]
+/// Audit L6: compare the presented bootstrap token with the configured secret
+/// in constant time. An empty secret or token never matches. Pure logic with
+/// no server dependency, so it is available in every build.
+pub fn bootstrap_token_matches(presented: &str, secret: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    if presented.is_empty() || secret.is_empty() {
+        return false;
+    }
+    presented.as_bytes().ct_eq(secret.as_bytes()).into()
+}
+
 fn bearer_token(headers: &HeaderMap) -> Result<String, MnemesError> {
     let value = headers
         .get("authorization")
@@ -943,7 +953,7 @@ async fn register_device_handler(
 ) -> Response {
     match std::env::var("BOOTSTRAP_SECRET") {
         Ok(secret) => match bearer_token(&headers) {
-            Ok(token) if token == secret => {}
+            Ok(token) if bootstrap_token_matches(&token, &secret) => {}
             _ => return error_response(&MnemesError::InvalidCredential),
         },
         Err(std::env::VarError::NotPresent) => match state.store.count_devices().await {

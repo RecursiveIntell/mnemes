@@ -1218,15 +1218,18 @@ impl MnemesStore {
             None => return Err(MnemesError::InvalidCredential),
         };
 
+        // Audit L6: verify the credential before revealing any device status.
+        // Previously a revoked/quarantined device disclosed its status to any
+        // caller holding no valid secret.
+        let full_token = format!("{}:{}", device_id.as_str(), secret);
+        if !DeviceCredential::verify(&stored_fingerprint, &full_token) {
+            return Err(MnemesError::InvalidCredential);
+        }
+
         if status != DeviceStatus::Active.as_str() {
             return Err(MnemesError::DeviceNotActive(format!(
                 "{device_id} (status: {status})"
             )));
-        }
-
-        let full_token = format!("{}:{}", device_id.as_str(), secret);
-        if !DeviceCredential::verify(&stored_fingerprint, &full_token) {
-            return Err(MnemesError::InvalidCredential);
         }
 
         let device = self
@@ -5390,6 +5393,46 @@ mod tests {
         assert_eq!(fetched.device_id, dev_id);
         assert_eq!(fetched.label, "laptop");
         assert_eq!(fetched.status, DeviceStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn revoked_device_with_wrong_secret_does_not_leak_status() {
+        // Audit L6: status must only be revealed after the credential verifies.
+        let (store, _dir) = open_test_store();
+        let (device_id, _credential) = store
+            .register_device_with_generated_credential(Device::new(
+                DeviceId::new(),
+                "victim",
+                "linux",
+                "host",
+            ))
+            .await
+            .unwrap();
+        store.revoke_device(&device_id).await.unwrap();
+
+        let forged = format!("{}:{}", device_id.as_str(), "x".repeat(64));
+        let err = store.token_device_id(&forged).await.unwrap_err();
+        assert!(
+            matches!(err, MnemesError::InvalidCredential),
+            "wrong secret must not reveal revoked status, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoked_device_with_correct_secret_reports_status() {
+        let (store, _dir) = open_test_store();
+        let (device_id, credential) = store
+            .register_device_with_generated_credential(Device::new(
+                DeviceId::new(),
+                "victim",
+                "linux",
+                "host",
+            ))
+            .await
+            .unwrap();
+        store.revoke_device(&device_id).await.unwrap();
+        let err = store.token_device_id(&credential).await.unwrap_err();
+        assert!(matches!(err, MnemesError::DeviceNotActive(_)));
     }
 
     #[tokio::test]
