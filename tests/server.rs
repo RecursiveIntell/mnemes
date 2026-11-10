@@ -3,7 +3,7 @@ use mnemes::replication::{
     FactCreateTransportEntryV1, FactSupersedeTransportEntryV1, SignedFactCreateBatchV1,
     SignedFactSupersedeBatchV1,
 };
-use mnemes::server::{build_memory_store, build_router, build_staged_fact_supersede_router};
+use mnemes::server::{build_memory_store, build_staged_fact_supersede_router};
 use mnemes::{
     canonical_memory_store_relative_path, Actor, ActorId, ActorProfileBinding, Device, DeviceId,
     FactCreateAdmission, FactSupersedeAdmission, MemoryProfile, MemoryProfileId,
@@ -2363,7 +2363,9 @@ async fn fact_supersede_http_reports_changed_same_sequence_owner_envelope_as_con
 async fn unauthenticated_first_device_self_enrollment_is_refused_without_bootstrap_secret() {
     let (temp, store) = open_store().await;
     let app = mnemes::server::build_router(store);
-    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0)).await.unwrap();
+    let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
+        .await
+        .unwrap();
     let base_url = format!("http://{}", listener.local_addr().unwrap());
     let handle = tokio::spawn(async move {
         axum::serve(listener, app).await.unwrap();

@@ -980,11 +980,10 @@ async fn register_device_handler(
         // which an operator sets only for initial setup.
         Err(std::env::VarError::NotPresent) => match state.store.count_devices().await {
             Ok(0) if state.allow_first_device_setup => {}
-            Ok(0) => {
-                return error_response(&MnemesError::AuthorizationDenied(
-                    "first-device setup requires BOOTSTRAP_SECRET or MNEMES_ALLOW_FIRST_DEVICE_SETUP=1".to_string(),
-                ))
-            }
+            Ok(0) => return error_response(&MnemesError::AuthorizationDenied(
+                "first-device setup requires BOOTSTRAP_SECRET or MNEMES_ALLOW_FIRST_DEVICE_SETUP=1"
+                    .to_string(),
+            )),
             Ok(_) => {
                 return error_response(&MnemesError::AuthorizationDenied(
                     "registration closed".to_string(),
