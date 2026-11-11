@@ -11,7 +11,10 @@ env:
   # The revision of RecursiveIntell/Libraries that mnemes builds against.
   # Bump deliberately: it is the semantic-memory source of truth for this
   # crate until a published release carries the journal supersede API.
-  LIBRARIES_REF: 8f0e7b8d45d38eabc6302a190e8686abd109b1a2
+  # Post-#82 Libraries main: rusqlite 0.41.1 (bundled SQLite 3.54.1). mnemes
+  # shares the libsqlite3-sys graph with semantic-memory via the path dep, so
+  # this pin must always be a revision whose rusqlite matches mnemes'.
+  LIBRARIES_REF: 9179b0261e7491ea595f32ca2b0973cb584fed27
 
 jobs:
   test:
