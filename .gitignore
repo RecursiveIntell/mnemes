@@ -4,3 +4,4 @@ target/
 *.db-shm
 __pycache__/
 *.py[cod]
+Libraries/

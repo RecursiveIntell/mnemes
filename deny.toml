@@ -1,0 +1,48 @@
+# cargo-deny configuration for mnemes.
+#
+# Advisory policy per the operator decision of 2026-11-11 (see the Libraries
+# repo's docs/supply-chain-deferral-2026-11-11.md, the canonical deferral
+# record):
+# - vulnerabilities, unsound, and yanked advisories FAIL the check
+#   (mnemes' zip chain was fixed to 9.5.1 via the Libraries candle-0.11 bump);
+# - the two unmaintained advisories with no patched upstream release are
+#   ignored here, with the deferral record carrying owner/reachability/expiry.
+# Any new advisory not listed below still fails the check.
+
+[advisories]
+version = 2
+yanked = "deny"
+ignore = [
+    # Deferred 2026-11-11, review 2027-05 (see Libraries
+    # docs/supply-chain-deferral-2026-11-11.md). bincode 1.3.3 is a direct dep
+    # of the Libraries cea-core/fib-quant crates that semantic-memory (this
+    # repo's path dependency) links; no patched release exists upstream.
+    "RUSTSEC-2025-0141", # bincode — via Libraries cea-core/fib-quant
+    # Deferred 2026-11-11, review 2027-05. Transitive paste via simba ->
+    # nalgebra -> statrs/fib-quant inside Libraries.
+    "RUSTSEC-2024-0436", # paste — Libraries nalgebra chain
+]
+
+[licenses]
+version = 2
+confidence-threshold = 0.8
+allow = [
+    "Apache-2.0",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "MIT",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "warn"
+wildcards = "allow"
+highlight = "all"
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
