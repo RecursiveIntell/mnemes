@@ -11,10 +11,8 @@ env:
   # The revision of RecursiveIntell/Libraries that mnemes builds against.
   # Bump deliberately: it is the semantic-memory source of truth for this
   # crate until a published release carries the journal supersede API.
-  # Post-#82 Libraries main: rusqlite 0.41.1 (bundled SQLite 3.54.1). mnemes
-  # shares the libsqlite3-sys graph with semantic-memory via the path dep, so
-  # this pin must always be a revision whose rusqlite matches mnemes'.
-  LIBRARIES_REF: 9179b0261e7491ea595f32ca2b0973cb584fed27
+  # This revision matches Cargo.lock's rusqlite, LRU, and Candle graph.
+  LIBRARIES_REF: f9cb8838cf87948158f7dc73b063001614a7edec
 
 jobs:
   test:
@@ -48,7 +46,7 @@ jobs:
         run: cargo fmt --all -- --check
       - name: Clippy
         working-directory: mnemes
-        run: cargo clippy --all-targets --all-features -- -D warnings
+        run: cargo clippy --locked --all-targets --all-features -- -D warnings
       - name: Test
         working-directory: mnemes
         # The default candle embedder eagerly downloads ~547 MB from
@@ -56,4 +54,14 @@ jobs:
         # pool, so CLI tests fail with 'failed to download config.json:
         # Rate limited'. These tests exercise CLI plumbing, not embedding
         # quality, so run them with the deterministic offline embedder.
-        run: MNEMES_EMBEDDER=mock cargo test --all-features --verbose
+        run: MNEMES_EMBEDDER=mock cargo test --locked --all-features --verbose
+      - name: Install pinned cargo-deny
+        uses: taiki-e/install-action@cfdb7ed4ccc7c7dce37759eae89dc5674b469b39
+        with:
+          tool: cargo-deny@0.19.8
+      - name: Check locked dependency advisories
+        working-directory: mnemes
+        run: cargo deny --locked --all-features check advisories
+      - name: Verify lockfile was preserved
+        working-directory: mnemes
+        run: git diff --exit-code -- Cargo.lock
