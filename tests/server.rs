@@ -817,6 +817,7 @@ async fn mcp_tools_list_and_call_are_profile_scoped() {
         "sm_get_operation",
         "sm_search_witnessed",
         "sm_stats",
+        "sm_shards",
         "sm_health",
         "sm_heartbeat",
     ];
@@ -1025,6 +1026,23 @@ async fn mcp_read_and_operator_tools_are_store_backed() {
     )
     .await;
     assert_eq!(stats["pooled"]["operations"].as_u64().unwrap(), 1);
+
+    let shards = mcp_call(
+        &client,
+        &server,
+        &device.credential,
+        &operator.actor_id,
+        "sm_shards",
+        json!({}),
+    )
+    .await;
+    let shards = shards.as_array().expect("sm_shards returns an array");
+    assert!(
+        shards
+            .iter()
+            .any(|shard| shard["device_id"] == json!(device.device_id)),
+        "registered device must appear in the shard catalog"
+    );
 
     let health = mcp_call(
         &client,

@@ -1919,6 +1919,11 @@ fn tools_for_actor(actor: Option<&Actor>) -> Vec<McpTool> {
             input_schema: json!({"type":"object","additionalProperties": false}),
         },
         McpTool {
+            name: "sm_shards".to_string(),
+            description: "Read per-device shard routing-catalog counts and state".to_string(),
+            input_schema: json!({"type":"object","additionalProperties": false}),
+        },
+        McpTool {
             name: "sm_health".to_string(),
             description: "Read service health".to_string(),
             input_schema: json!({"type":"object","additionalProperties": false}),
@@ -2041,6 +2046,7 @@ fn read_tool(name: &str) -> bool {
             | "sm_search_witnessed"
             | "sm_search_profile_witnessed"
             | "sm_stats"
+            | "sm_shards"
             | "sm_health"
             | "sm_heartbeat"
     )
@@ -2728,6 +2734,16 @@ async fn mcp_handler(
                         })
                         .map_err(|error| {
                             MnemesError::InvalidAsOf(format!("failed to serialize result: {error}"))
+                        })?
+                    }
+                    "sm_shards" => {
+                        // Read-only routing-catalog visibility: per-device shard
+                        // counts and lifecycle state as recorded in pooled.db.
+                        let shards = state.store.list_shards().await?;
+                        serde_json::to_value(shards).map_err(|error| {
+                            MnemesError::InvalidAsOf(format!(
+                                "failed to serialize shard stats: {error}"
+                            ))
                         })?
                     }
                     "sm_health" => serde_json::to_value(build_health_payload(&state).await)
