@@ -12,6 +12,8 @@
 [advisories]
 version = 2
 yanked = "deny"
+unmaintained = "all"
+unsound = "all"
 ignore = [
     # Deferred 2026-11-11, review 2027-05 (see Libraries
     # docs/supply-chain-deferral-2026-11-11.md). bincode 1.3.3 is a direct dep
@@ -21,15 +23,13 @@ ignore = [
     # Deferred 2026-11-11, review 2027-05. Transitive paste via simba ->
     # nalgebra -> statrs/fib-quant inside Libraries.
     "RUSTSEC-2024-0436", # paste — Libraries nalgebra chain
-    # Deferred 2026-11-26 under the same unmaintained-without-patch policy,
-    # review 2027-05 (see docs/supply-chain-deferral-2026-11-26.md). chrono is
-    # used directly here and by Libraries semantic-memory, bitemporal-runtime,
-    # forge-memory-bridge and stack-ids, plus hf-hub's xet crates; no
-    # maintained release exists. Unmaintained, not a known vulnerability.
-    "RUSTSEC-2026-0543", # chrono — direct + Libraries + hf-hub/xet
-    # Deferred 2026-11-26, review 2027-05. humantime is unmaintained because it
-    # wraps chrono; reached only via hf-hub -> hf-xet -> xet-runtime.
-    "RUSTSEC-2026-0542", # humantime — hf-hub/xet chain
+    # Deferred maintenance-only advisory; no patched chrono release exists.
+    # Owner: RecursiveIntell supply-chain lane; review deadline 2027-05-31.
+    # Reachability and exit triggers: docs/supply-chain-deferral-2026-11-26.md.
+    { id = "RUSTSEC-2026-0543", reason = "No patched release; owner: RecursiveIntell supply-chain lane; review by 2027-05-31" }, # chrono — direct + Libraries + hf-hub/xet
+    # Deferred maintenance-only advisory; humantime wraps chrono and is reached
+    # via hf-hub -> hf-xet -> xet-runtime. Same owner/review deadline as above.
+    { id = "RUSTSEC-2026-0542", reason = "No patched release; owner: RecursiveIntell supply-chain lane; review by 2027-05-31" }, # humantime — hf-hub/xet chain
 ]
 
 [licenses]

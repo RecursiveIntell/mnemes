@@ -30,4 +30,4 @@ migration away from chrono, an hf-hub/xet release that drops chrono or
 humantime, or any new vulnerability advisory against either crate (immediate
 action then).
 
-Review owner: RecursiveIntell supply-chain lane. Review date: 2027-05.
+Review owner: RecursiveIntell supply-chain lane. Review deadline and ignore expiry: 2027-05-31.
