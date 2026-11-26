@@ -3,8 +3,8 @@
 This record extends the 2026-11-11 policy recorded in the Libraries repository
 (`docs/supply-chain-deferral-2026-11-11.md`): vulnerabilities, unsound and
 yanked advisories fail the `cargo deny` check; unmaintained advisories with no
-patched release are ignored only with a recorded owner, reachability and
-review date.
+patched release are deferred only with a recorded owner, dependency-graph inclusion paths,
+and review date.
 
 ## Fixed
 
