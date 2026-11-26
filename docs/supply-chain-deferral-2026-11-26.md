@@ -14,7 +14,7 @@ review date.
 
 ## Deferred (unmaintained, no maintained release)
 
-| Advisory | Crate | Reachability | Alternatives |
+| Advisory | Crate | Dependency-graph inclusion paths (not runtime reachability) | Alternatives |
 |---|---|---|---|
 | RUSTSEC-2026-0543 | chrono 0.4.45 | Direct dependency of mnemes; also Libraries semantic-memory, bitemporal-runtime, forge-memory-bridge, stack-ids, semantic-memory-forge; hf-hub's xet-data/xet-runtime | jiff, time |
 | RUSTSEC-2026-0542 | humantime 2.4.0 | hf-hub → hf-xet → xet-runtime (and xet-client/xet-data) | — (follows the chrono migration upstream) |
