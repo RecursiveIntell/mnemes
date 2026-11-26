@@ -827,6 +827,7 @@ async fn mcp_tools_list_and_call_are_profile_scoped() {
         "sm_register_actor",
         "sm_submit_operation",
         "sm_verify_integrity",
+        "sm_shards",
     ];
     let legacy = [
         "devices.list",
@@ -881,6 +882,22 @@ async fn mcp_tools_list_and_call_are_profile_scoped() {
         .await
         .unwrap();
     assert_eq!(denied_write_call.status(), StatusCode::FORBIDDEN);
+
+    let denied_shard_catalog_call = client
+        .post(format!("{}/v1/mcp", server.base_url))
+        .bearer_auth(&device.credential)
+        .json(&json!({
+            "method": "tools/call",
+            "params": {
+                "actor_id": agent.actor_id,
+                "name": "sm_shards",
+            },
+            "id": "shard-catalog",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied_shard_catalog_call.status(), StatusCode::FORBIDDEN);
 
     let denied_hidden_call = client
         .post(format!("{}/v1/mcp", server.base_url))
@@ -1025,6 +1042,23 @@ async fn mcp_read_and_operator_tools_are_store_backed() {
     )
     .await;
     assert_eq!(stats["pooled"]["operations"].as_u64().unwrap(), 1);
+
+    let shards = mcp_call(
+        &client,
+        &server,
+        &device.credential,
+        &operator.actor_id,
+        "sm_shards",
+        json!({}),
+    )
+    .await;
+    let shards = shards.as_array().expect("sm_shards returns an array");
+    assert!(
+        shards
+            .iter()
+            .any(|shard| shard["device_id"] == json!(device.device_id)),
+        "registered device must appear in the shard catalog"
+    );
 
     let health = mcp_call(
         &client,
