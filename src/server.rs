@@ -48,6 +48,9 @@ pub struct ServerState {
     store: Arc<MnemesStore>,
     server_id: String,
     run_pack_attestation_key: Option<Arc<[u8]>>,
+    /// Phase 6.3: explicit operator opt-in for first-device setup without a bootstrap
+    /// secret. Defaults to false. Per-server, never process-global.
+    allow_first_device_setup: bool,
 }
 
 #[cfg(feature = "server")]
@@ -422,11 +425,24 @@ struct RunPackObservationResponse {
 }
 
 #[cfg(feature = "server")]
+/// Test and operator-setup router that enables first-device enrollment for this server
+/// only. Production code paths use [`build_router`], which keeps it off.
+#[cfg(feature = "server")]
+pub fn build_router_allowing_first_device_setup(store: MnemesStore) -> Router {
+    build_router_with_state(ServerState {
+        store: Arc::new(store),
+        server_id: Uuid::new_v4().to_string(),
+        run_pack_attestation_key: None,
+        allow_first_device_setup: true,
+    })
+}
+
 pub fn build_router(store: MnemesStore) -> Router {
     build_router_with_state(ServerState {
         store: Arc::new(store),
         server_id: Uuid::new_v4().to_string(),
         run_pack_attestation_key: None,
+        allow_first_device_setup: false,
     })
 }
 
@@ -440,6 +456,7 @@ pub fn build_staged_fact_supersede_router(store: MnemesStore) -> Router {
         store: Arc::new(store),
         server_id: Uuid::new_v4().to_string(),
         run_pack_attestation_key: None,
+        allow_first_device_setup: false,
     })
 }
 
@@ -449,6 +466,7 @@ pub fn build_router_with_run_pack_attestation_key(store: MnemesStore, key: Vec<u
         store: Arc::new(store),
         server_id: Uuid::new_v4().to_string(),
         run_pack_attestation_key: Some(Arc::from(key.into_boxed_slice())),
+        allow_first_device_setup: false,
     })
 }
 
@@ -716,7 +734,17 @@ async fn fact_supersede_handler(
         .into_response()
 }
 
-#[cfg(feature = "server")]
+/// Audit L6: compare the presented bootstrap token with the configured secret
+/// in constant time. An empty secret or token never matches. Pure logic with
+/// no server dependency, so it is available in every build.
+pub fn bootstrap_token_matches(presented: &str, secret: &str) -> bool {
+    use subtle::ConstantTimeEq;
+    if presented.is_empty() || secret.is_empty() {
+        return false;
+    }
+    presented.as_bytes().ct_eq(secret.as_bytes()).into()
+}
+
 fn bearer_token(headers: &HeaderMap) -> Result<String, MnemesError> {
     let value = headers
         .get("authorization")
@@ -943,11 +971,19 @@ async fn register_device_handler(
 ) -> Response {
     match std::env::var("BOOTSTRAP_SECRET") {
         Ok(secret) => match bearer_token(&headers) {
-            Ok(token) if token == secret => {}
+            Ok(token) if bootstrap_token_matches(&token, &secret) => {}
             _ => return error_response(&MnemesError::InvalidCredential),
         },
+        // No bootstrap secret configured. Phase 6.3: an empty store must NOT let an
+        // unauthenticated caller enroll itself as the first device. First-device creation
+        // requires the explicit one-time operator opt-in MNEMES_ALLOW_FIRST_DEVICE_SETUP=1,
+        // which an operator sets only for initial setup.
         Err(std::env::VarError::NotPresent) => match state.store.count_devices().await {
-            Ok(0) => {}
+            Ok(0) if state.allow_first_device_setup => {}
+            Ok(0) => return error_response(&MnemesError::AuthorizationDenied(
+                "first-device setup requires BOOTSTRAP_SECRET or MNEMES_ALLOW_FIRST_DEVICE_SETUP=1"
+                    .to_string(),
+            )),
             Ok(_) => {
                 return error_response(&MnemesError::AuthorizationDenied(
                     "registration closed".to_string(),

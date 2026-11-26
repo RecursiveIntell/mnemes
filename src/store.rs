@@ -1218,15 +1218,18 @@ impl MnemesStore {
             None => return Err(MnemesError::InvalidCredential),
         };
 
+        // Audit L6: verify the credential before revealing any device status.
+        // Previously a revoked/quarantined device disclosed its status to any
+        // caller holding no valid secret.
+        let full_token = format!("{}:{}", device_id.as_str(), secret);
+        if !DeviceCredential::verify(&stored_fingerprint, &full_token) {
+            return Err(MnemesError::InvalidCredential);
+        }
+
         if status != DeviceStatus::Active.as_str() {
             return Err(MnemesError::DeviceNotActive(format!(
                 "{device_id} (status: {status})"
             )));
-        }
-
-        let full_token = format!("{}:{}", device_id.as_str(), secret);
-        if !DeviceCredential::verify(&stored_fingerprint, &full_token) {
-            return Err(MnemesError::InvalidCredential);
         }
 
         let device = self
@@ -3211,14 +3214,15 @@ impl MnemesStore {
                 row.get::<_, String>(0)?,
                 row.get::<_, String>(1)?,
                 row.get::<_, String>(2)?,
-                row.get::<_, u64>(3)?,
+                // rusqlite 0.41: read i64, convert (u64 FromSql removed).
+                row.get::<_, i64>(3)? as u64,
                 row.get::<_, String>(4)?,
                 row.get::<_, String>(5)?,
-                row.get::<_, u64>(6)?,
-                row.get::<_, u64>(7)?,
-                row.get::<_, u64>(8)?,
-                row.get::<_, u64>(9)?,
-                row.get::<_, u64>(10)?,
+                row.get::<_, i64>(6)? as u64,
+                row.get::<_, i64>(7)? as u64,
+                row.get::<_, i64>(8)? as u64,
+                row.get::<_, i64>(9)? as u64,
+                row.get::<_, i64>(10)? as u64,
                 row.get::<_, f64>(11)?,
                 row.get::<_, Option<String>>(12)?,
                 row.get::<_, String>(13)?,
@@ -3314,10 +3318,11 @@ impl MnemesStore {
                  last_refreshed_at = ?5
              WHERE device_id = ?6",
             params![
-                stats.total_facts,
-                stats.total_documents,
-                stats.total_chunks,
-                stats.total_messages,
+                // rusqlite 0.41: bind via i64 (u64 ToSql removed).
+                stats.total_facts as i64,
+                stats.total_documents as i64,
+                stats.total_chunks as i64,
+                stats.total_messages as i64,
                 Utc::now().to_rfc3339(),
                 device_id.as_str(),
             ],
@@ -3356,10 +3361,11 @@ impl MnemesStore {
             params![
                 normalized_terms,
                 namespaces_json,
-                stats.total_facts,
-                stats.total_documents,
-                stats.total_chunks,
-                stats.total_messages,
+                // rusqlite 0.41: bind via i64 (u64 ToSql removed).
+                stats.total_facts as i64,
+                stats.total_documents as i64,
+                stats.total_chunks as i64,
+                stats.total_messages as i64,
                 refreshed_at,
                 device_id.as_str(),
             ],
@@ -3408,13 +3414,14 @@ impl MnemesStore {
              FROM device_shards",
             [],
             |row| {
+                // rusqlite 0.41: read i64, convert (u64 FromSql removed).
                 Ok(ShardAggregateStats {
-                    shards: row.get(0)?,
-                    facts: row.get(1)?,
-                    documents: row.get(2)?,
-                    chunks: row.get(3)?,
-                    messages: row.get(4)?,
-                    searches: row.get(5)?,
+                    shards: row.get::<_, i64>(0)? as u64,
+                    facts: row.get::<_, i64>(1)? as u64,
+                    documents: row.get::<_, i64>(2)? as u64,
+                    chunks: row.get::<_, i64>(3)? as u64,
+                    messages: row.get::<_, i64>(4)? as u64,
+                    searches: row.get::<_, i64>(5)? as u64,
                 })
             },
         )
@@ -3900,8 +3907,9 @@ impl MnemesStore {
                 receipt.receipt_id,
                 receipt.requester_device_id.as_str(),
                 receipt.query_sha256,
-                receipt.shard_budget as u64,
-                receipt.actual_selected_shard_count as u64,
+                // rusqlite 0.41: usize/u64 ToSql removed; bind via i64.
+                receipt.shard_budget as u64 as i64,
+                receipt.actual_selected_shard_count as u64 as i64,
                 i64::from(receipt.exhaustive),
                 eligible,
                 ranked,
@@ -3938,8 +3946,9 @@ impl MnemesStore {
                         row.get::<_, String>(0)?,
                         row.get::<_, String>(1)?,
                         row.get::<_, String>(2)?,
-                        row.get::<_, usize>(3)?,
-                        row.get::<_, usize>(4)?,
+                        // rusqlite 0.41: read i64, convert (usize FromSql removed).
+                        row.get::<_, i64>(3)? as usize,
+                        row.get::<_, i64>(4)? as usize,
                         row.get::<_, bool>(5)?,
                         row.get::<_, String>(6)?,
                         row.get::<_, String>(7)?,
@@ -4148,8 +4157,8 @@ impl MnemesStore {
     pub async fn count_devices(&self) -> Result<u64, MnemesError> {
         let conn = self.pool_conn.lock().await;
         let total = conn.query_row("SELECT COUNT(*) FROM devices", [], |row| {
-            row.get::<_, u64>(0)
-        })?;
+            row.get::<_, i64>(0)
+        })? as u64;
         Ok(total)
     }
 
@@ -4157,8 +4166,8 @@ impl MnemesStore {
     pub async fn count_actors(&self) -> Result<u64, MnemesError> {
         let conn = self.pool_conn.lock().await;
         let total = conn.query_row("SELECT COUNT(*) FROM actors", [], |row| {
-            row.get::<_, u64>(0)
-        })?;
+            row.get::<_, i64>(0)
+        })? as u64;
         Ok(total)
     }
 
@@ -4166,8 +4175,8 @@ impl MnemesStore {
     pub async fn count_operations(&self) -> Result<u64, MnemesError> {
         let conn = self.pool_conn.lock().await;
         let total = conn.query_row("SELECT COUNT(*) FROM operation_envelopes", [], |row| {
-            row.get::<_, u64>(0)
-        })?;
+            row.get::<_, i64>(0)
+        })? as u64;
         Ok(total)
     }
 
@@ -5390,6 +5399,46 @@ mod tests {
         assert_eq!(fetched.device_id, dev_id);
         assert_eq!(fetched.label, "laptop");
         assert_eq!(fetched.status, DeviceStatus::Active);
+    }
+
+    #[tokio::test]
+    async fn revoked_device_with_wrong_secret_does_not_leak_status() {
+        // Audit L6: status must only be revealed after the credential verifies.
+        let (store, _dir) = open_test_store();
+        let (device_id, _credential) = store
+            .register_device_with_generated_credential(Device::new(
+                DeviceId::new(),
+                "victim",
+                "linux",
+                "host",
+            ))
+            .await
+            .unwrap();
+        store.revoke_device(&device_id).await.unwrap();
+
+        let forged = format!("{}:{}", device_id.as_str(), "x".repeat(64));
+        let err = store.token_device_id(&forged).await.unwrap_err();
+        assert!(
+            matches!(err, MnemesError::InvalidCredential),
+            "wrong secret must not reveal revoked status, got {err:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn revoked_device_with_correct_secret_reports_status() {
+        let (store, _dir) = open_test_store();
+        let (device_id, credential) = store
+            .register_device_with_generated_credential(Device::new(
+                DeviceId::new(),
+                "victim",
+                "linux",
+                "host",
+            ))
+            .await
+            .unwrap();
+        store.revoke_device(&device_id).await.unwrap();
+        let err = store.token_device_id(&credential).await.unwrap_err();
+        assert!(matches!(err, MnemesError::DeviceNotActive(_)));
     }
 
     #[tokio::test]
