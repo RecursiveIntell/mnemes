@@ -1919,11 +1919,6 @@ fn tools_for_actor(actor: Option<&Actor>) -> Vec<McpTool> {
             input_schema: json!({"type":"object","additionalProperties": false}),
         },
         McpTool {
-            name: "sm_shards".to_string(),
-            description: "Read per-device shard routing-catalog counts and state".to_string(),
-            input_schema: json!({"type":"object","additionalProperties": false}),
-        },
-        McpTool {
             name: "sm_health".to_string(),
             description: "Read service health".to_string(),
             input_schema: json!({"type":"object","additionalProperties": false}),
@@ -2030,6 +2025,13 @@ fn tools_for_actor(actor: Option<&Actor>) -> Vec<McpTool> {
             description: "Run integrity checks".to_string(),
             input_schema: json!({"type":"object","additionalProperties": false}),
         });
+        tools.push(McpTool {
+            name: "sm_shards".to_string(),
+            description:
+                "Read all per-device shard routing-catalog counts and state (operator only)"
+                    .to_string(),
+            input_schema: json!({"type":"object","additionalProperties": false}),
+        });
     }
 
     tools
@@ -2046,7 +2048,6 @@ fn read_tool(name: &str) -> bool {
             | "sm_search_witnessed"
             | "sm_search_profile_witnessed"
             | "sm_stats"
-            | "sm_shards"
             | "sm_health"
             | "sm_heartbeat"
     )
@@ -2062,6 +2063,7 @@ fn operator_tool(name: &str) -> bool {
             | "sm_register_actor"
             | "sm_submit_operation"
             | "sm_verify_integrity"
+            | "sm_shards"
     )
 }
 

@@ -817,7 +817,6 @@ async fn mcp_tools_list_and_call_are_profile_scoped() {
         "sm_get_operation",
         "sm_search_witnessed",
         "sm_stats",
-        "sm_shards",
         "sm_health",
         "sm_heartbeat",
     ];
@@ -828,6 +827,7 @@ async fn mcp_tools_list_and_call_are_profile_scoped() {
         "sm_register_actor",
         "sm_submit_operation",
         "sm_verify_integrity",
+        "sm_shards",
     ];
     let legacy = [
         "devices.list",
@@ -882,6 +882,22 @@ async fn mcp_tools_list_and_call_are_profile_scoped() {
         .await
         .unwrap();
     assert_eq!(denied_write_call.status(), StatusCode::FORBIDDEN);
+
+    let denied_shard_catalog_call = client
+        .post(format!("{}/v1/mcp", server.base_url))
+        .bearer_auth(&device.credential)
+        .json(&json!({
+            "method": "tools/call",
+            "params": {
+                "actor_id": agent.actor_id,
+                "name": "sm_shards",
+            },
+            "id": "shard-catalog",
+        }))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(denied_shard_catalog_call.status(), StatusCode::FORBIDDEN);
 
     let denied_hidden_call = client
         .post(format!("{}/v1/mcp", server.base_url))
