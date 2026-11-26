@@ -5,13 +5,15 @@
 # record):
 # - vulnerabilities, unsound, and yanked advisories FAIL the check
 #   (mnemes' zip chain was fixed to 9.5.1 via the Libraries candle-0.11 bump);
-# - the two unmaintained advisories with no patched upstream release are
-#   ignored here, with the deferral record carrying owner/reachability/expiry.
+# - only specifically named unmaintained advisories with no patched release
+#   receive documented deferrals with an owner, dependency-graph context, and review date.
 # Any new advisory not listed below still fails the check.
 
 [advisories]
 version = 2
 yanked = "deny"
+unmaintained = "all"
+unsound = "all"
 ignore = [
     # Deferred 2026-11-11, review 2027-05 (see Libraries
     # docs/supply-chain-deferral-2026-11-11.md). bincode 1.3.3 is a direct dep
@@ -21,6 +23,13 @@ ignore = [
     # Deferred 2026-11-11, review 2027-05. Transitive paste via simba ->
     # nalgebra -> statrs/fib-quant inside Libraries.
     "RUSTSEC-2024-0436", # paste — Libraries nalgebra chain
+    # Deferred maintenance-only advisory; no patched chrono release exists.
+    # Owner: RecursiveIntell supply-chain lane; review deadline 2027-05-31.
+    # Dependency-graph inclusion paths (not runtime reachability) and exit triggers: docs/supply-chain-deferral-2026-11-26.md.
+    { id = "RUSTSEC-2026-0543", reason = "No patched release; owner: RecursiveIntell supply-chain lane; review by 2027-05-31" }, # chrono — direct + Libraries + hf-hub/xet
+    # Deferred maintenance-only advisory; humantime wraps chrono and is reached
+    # via hf-hub -> hf-xet -> xet-runtime. Same owner/review deadline as above.
+    { id = "RUSTSEC-2026-0542", reason = "No patched release; owner: RecursiveIntell supply-chain lane; review by 2027-05-31" }, # humantime — hf-hub/xet chain
 ]
 
 [licenses]

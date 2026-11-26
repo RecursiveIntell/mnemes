@@ -2025,6 +2025,13 @@ fn tools_for_actor(actor: Option<&Actor>) -> Vec<McpTool> {
             description: "Run integrity checks".to_string(),
             input_schema: json!({"type":"object","additionalProperties": false}),
         });
+        tools.push(McpTool {
+            name: "sm_shards".to_string(),
+            description:
+                "Read all per-device shard routing-catalog counts and state (operator only)"
+                    .to_string(),
+            input_schema: json!({"type":"object","additionalProperties": false}),
+        });
     }
 
     tools
@@ -2056,6 +2063,7 @@ fn operator_tool(name: &str) -> bool {
             | "sm_register_actor"
             | "sm_submit_operation"
             | "sm_verify_integrity"
+            | "sm_shards"
     )
 }
 
@@ -2728,6 +2736,16 @@ async fn mcp_handler(
                         })
                         .map_err(|error| {
                             MnemesError::InvalidAsOf(format!("failed to serialize result: {error}"))
+                        })?
+                    }
+                    "sm_shards" => {
+                        // Read-only routing-catalog visibility: per-device shard
+                        // counts and lifecycle state as recorded in pooled.db.
+                        let shards = state.store.list_shards().await?;
+                        serde_json::to_value(shards).map_err(|error| {
+                            MnemesError::InvalidAsOf(format!(
+                                "failed to serialize shard stats: {error}"
+                            ))
                         })?
                     }
                     "sm_health" => serde_json::to_value(build_health_payload(&state).await)
